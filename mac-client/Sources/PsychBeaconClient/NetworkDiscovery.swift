@@ -10,10 +10,29 @@ enum HostRoute {
     case tailscale(host: String, port: UInt16)
 }
 
-enum DiscoveryError: Error {
+enum DiscoveryError: Error, CustomStringConvertible {
     case socketCreationFailed
     case hostNotFound
-    case tailscaleUnavailable
+    /// Two genuinely different failure modes that both used to throw a
+    /// bare, identical `tailscaleUnavailable` — found undiagnosable in
+    /// practice: "same error" after fixing the peer's actual hostname
+    /// gave no way to tell whether the CLI was even found at all versus
+    /// found-but-no-matching-peer.
+    case tailscaleBinaryNotFound
+    case tailscaleNoMatchingPeer(searchedFor: String, peersSeen: [String])
+
+    var description: String {
+        switch self {
+        case .socketCreationFailed: return "socketCreationFailed"
+        case .hostNotFound: return "hostNotFound"
+        case .tailscaleBinaryNotFound:
+            return "tailscaleBinaryNotFound (checked /Applications/Tailscale.app, /usr/local/bin, /opt/homebrew/bin)"
+        case .tailscaleNoMatchingPeer(let searchedFor, let peersSeen):
+            let peerList = peersSeen.isEmpty ? "(none)" : peersSeen.joined(separator: ", ")
+            return "tailscaleNoMatchingPeer(searched for hostname containing \"\(searchedFor)\", " +
+                "peers actually seen: \(peerList))"
+        }
+    }
 }
 
 /// Startup discovery for module 1: broadcast a UDP ping on the local subnet
@@ -128,7 +147,7 @@ struct NetworkDiscovery {
             "/opt/homebrew/bin/tailscale",
         ]
         guard let binaryPath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw DiscoveryError.tailscaleUnavailable
+            throw DiscoveryError.tailscaleBinaryNotFound
         }
 
         let process = Process()
@@ -148,7 +167,10 @@ struct NetworkDiscovery {
             let peer = status.peers.first(where: { $0.hostName.lowercased().contains(needle) }),
             let ip = peer.tailscaleIPs.first
         else {
-            throw DiscoveryError.tailscaleUnavailable
+            throw DiscoveryError.tailscaleNoMatchingPeer(
+                searchedFor: tailscaleTargetHostnameSubstring,
+                peersSeen: status.peers.map(\.hostName)
+            )
         }
 
         return .tailscale(host: ip, port: discoveryPort)
