@@ -25,6 +25,19 @@ struct NetworkDiscovery {
     var magicRequest = "PSYBEACON_DISCOVER_V1"
     var magicReplyPrefix = "PSYBEACON_HOST_V1:"
 
+    /// Which Tailscale peer counts as "the" host, when LAN discovery finds
+    /// nothing and this falls back to the mesh — a substring matched
+    /// case-insensitively against each peer's Tailscale `HostName`.
+    /// Defaults to "psybeacon", which only ever matches a peer actually
+    /// named that; override via `PSYBEACON_TARGET_HOST` for a real tailnet,
+    /// where the host keeps its own machine hostname (confirmed testing
+    /// against a tailnet with 8 devices, 4 of them Windows — matching "the"
+    /// host by any generic heuristic isn't reliable there, and doesn't need
+    /// to be once the target can just be named directly). E.g.:
+    /// `PSYBEACON_TARGET_HOST=slsupercomputer swift run PsychBeaconClient`
+    var tailscaleTargetHostnameSubstring: String =
+        ProcessInfo.processInfo.environment["PSYBEACON_TARGET_HOST"] ?? "psybeacon"
+
     /// Call once at client startup. Throws if the host can't be found by
     /// either path; the caller should surface that (retry, or prompt for a
     /// manual host address) rather than silently hanging.
@@ -130,10 +143,9 @@ struct NetworkDiscovery {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let status = try JSONDecoder().decode(TailscaleStatus.self, from: data)
 
-        // TODO(module 2): match on the host's actual advertised node name /
-        // tag once it registers one consistently, instead of a substring.
+        let needle = tailscaleTargetHostnameSubstring.lowercased()
         guard
-            let peer = status.peers.first(where: { $0.hostName.lowercased().contains("psybeacon") }),
+            let peer = status.peers.first(where: { $0.hostName.lowercased().contains(needle) }),
             let ip = peer.tailscaleIPs.first
         else {
             throw DiscoveryError.tailscaleUnavailable
