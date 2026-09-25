@@ -2,16 +2,26 @@ import AVFoundation
 import Cocoa
 import MetalKit
 
-/// First testable slice of module 4: prove VideoToolbox decode + Metal
-/// render work at all, against a real captured stream, before touching
-/// networking. Pass a path to an .h264/.ts/.mp4 file as the first
-/// command-line argument.
+/// Module 4's window + decode + render setup, now wired to the real
+/// network path: `NetworkDiscovery` resolves the host (module 1, unchanged
+/// since it was written — this is the first time anything actually calls
+/// it), then `NetworkStreamReceiver` requests and receives the live NVENC
+/// stream module 3 already proved works end-to-end on the Windows side.
 ///
-/// Verified working 2026-09-25: built and ran on macOS (Swift 5.9 toolchain,
-/// this repo's macOS 13 target), decoding an ffmpeg `testsrc` test pattern
-/// and rendering it correctly (colors, motion, the pattern's counter all
-/// correct — not just "a window appeared"). Two things worth knowing for
-/// next time this needs testing:
+/// Untested — unlike the file-based decode/render path this replaces
+/// (verified 2026-09-25 against an ffmpeg test pattern; see that
+/// verification's notes preserved below), nothing about
+/// `NetworkStreamReceiver`/`NALUnitParser` or `NetworkDiscovery`'s actual
+/// runtime behavior has been exercised yet. Pass a file path as the first
+/// command-line argument to fall back to the old file-based test harness
+/// (`playTestFile`, kept for exactly this — regression-testing decode/render
+/// in isolation from the network) instead of the network path.
+///
+/// Decode/render verification notes (2026-09-25, built and ran on macOS,
+/// Swift 5.9 toolchain, this repo's macOS 13 target): decoding an ffmpeg
+/// `testsrc` test pattern rendered correctly (colors, motion, the
+/// pattern's counter all correct — not just "a window appeared"). Two
+/// things worth knowing for next time this needs testing:
 /// - `MTLCreateSystemDefaultDevice`/`NSApplication` need an actual
 ///   interactive WindowServer session. Run in a real Terminal window, not
 ///   through an automation/agent context that executes commands outside
@@ -21,16 +31,18 @@ import MetalKit
 ///   `applicationDidFinishLaunching` never actually fires).
 /// - `swift build`/`swift run` in this package don't need Xcode installed,
 ///   just the Swift toolchain + macOS SDK.
-///
-/// TODO(module 4): replace `playTestFile` with the real path — read from
-/// the network (module 1's discovered `HostRoute`) instead of a local file,
-/// and drive `VideoDecoder.configure` from the stream's own SPS/PPS instead
-/// of `AVAssetReader` handing us a ready-made format description.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Fixed for now — arbitrary, just needs to be free and reachable from
+    /// the host on whichever route NetworkDiscovery resolved. TODO(module
+    /// 4): negotiate/randomize rather than hardcode, once there's a reason
+    /// to (e.g. running two clients on the same machine).
+    private let localStreamReceivePort: UInt16 = 43702
+
     private var window: NSWindow!
     private var mtkView: MTKView!
     private var renderer: MetalRenderer!
     private var decoder: VideoDecoder!
+    private var streamReceiver: NetworkStreamReceiver!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -69,11 +81,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        guard let path = CommandLine.arguments.dropFirst().first else {
-            print("Usage: PsychBeaconClient <path to .h264/.ts test file>")
-            return
+        if let path = CommandLine.arguments.dropFirst().first {
+            print("File argument given — using the local test harness, not the network.")
+            playTestFile(at: path)
+        } else {
+            connectToHost()
         }
-        playTestFile(at: path)
+    }
+
+    private func connectToHost() {
+        streamReceiver = NetworkStreamReceiver(decoder: decoder)
+
+        Task {
+            do {
+                let route = try await NetworkDiscovery().resolveHostRoute()
+                let hostAddress: String
+                let hostControlPort: UInt16
+                switch route {
+                case .lan(let host, let port):
+                    print("Found host on LAN at \(host):\(port)")
+                    (hostAddress, hostControlPort) = (host, port)
+                case .tailscale(let host, let port):
+                    print("No LAN host found; routing via Tailscale mesh IP \(host):\(port)")
+                    (hostAddress, hostControlPort) = (host, port)
+                }
+
+                try streamReceiver.start(
+                    hostAddress: hostAddress,
+                    hostControlPort: hostControlPort,
+                    localReceivePort: localStreamReceivePort
+                )
+            } catch {
+                print(
+                    "Couldn't connect to a host: \(error). Pass a local .h264/.ts/.mp4 file path "
+                        + "as an argument to test decode/render without a live host instead."
+                )
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

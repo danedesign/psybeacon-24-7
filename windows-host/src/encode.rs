@@ -24,6 +24,18 @@
 //! capture.rs. If NVENC init fails here with a similar version-mismatch
 //! message, that's almost certainly the same class of issue, not a bug in
 //! this code — check `ffmpeg -h encoder=h264_nvenc` actually runs first.
+//!
+//! Known gap, found force-killing `psybeacon-host.exe` during testing
+//! (same "don't do this" lesson as `vdd.rs`'s incident notes, different
+//! consequence): Windows does not kill a process's children when the
+//! parent is force-killed, so a force-killed launcher leaves its `ffmpeg`
+//! encoder subprocess running indefinitely, still trying to capture from a
+//! display that `VddSession::Drop` never got to remove either. Graceful
+//! shutdown (Ctrl+C, or `shutdown` being set) avoids this — `finish` runs
+//! and the child exits normally — this is purely a force-kill hazard. The
+//! real fix would be a Windows Job Object tying the child's lifetime to the
+//! parent's; not implemented, since every real code path here shuts down
+//! gracefully and this only bites ad hoc test/debug sessions.
 
 use std::io::{self, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -63,16 +75,14 @@ pub struct NvencEncoder {
 }
 
 impl NvencEncoder {
-    /// `output` is any FFmpeg output target: a local file path (elementary
-    /// H.264, for local verification) or a `udp://`/`srt://` URL (muxed as
-    /// MPEG-TS, the standard container for both — chosen automatically from
-    /// the URL scheme).
+    /// `output` is any FFmpeg output target: a local file path or a
+    /// `udp://`/`srt://` URL. Always raw elementary H.264 (Annex-B NAL
+    /// units), not MPEG-TS — the mac-client side parses NAL units directly
+    /// (`NetworkStreamReceiver.swift`) rather than demuxing a container, so
+    /// there's nothing for a container format to buy here, and one less
+    /// thing to keep in sync between the two ends of this protocol.
     pub fn spawn(config: &NvencConfig, output: &str) -> io::Result<Self> {
-        let container = if output.starts_with("udp://") || output.starts_with("srt://") {
-            "mpegts"
-        } else {
-            "h264"
-        };
+        let container = "h264";
 
         let mut child = Command::new("ffmpeg")
             .args([

@@ -1,18 +1,19 @@
 //! PsychBeacon 24/7 — Windows host launcher.
 //!
-//! Module 2 (Windows Host Controller & VDD Layer): brings up a virtual
-//! display via the Parsec VDD driver (see `vdd.rs`) and answers LAN
-//! discovery broadcasts from the macOS client (module 1). Module 3
-//! (capture.rs + encode.rs) exists and is independently verified, but not
-//! wired into this default startup path yet — see the TODO marker below,
-//! and capture.rs's module doc for why live capture specifically is
-//! currently parked rather than integrated.
+//! Answers module 1's LAN discovery broadcasts, and — once a client follows
+//! up with a `PSYBEACON_START_STREAM_V1:<port>` request over that same
+//! socket — brings up a virtual display (`vdd.rs`), captures it
+//! (`capture.rs`), and NVENC-encodes it to that client over UDP
+//! (`encode.rs`), all per `run_stream_session`. Each stream is fully
+//! self-contained: its own display, added on request and removed when the
+//! stream ends, not something kept running at launch regardless of whether
+//! a client wants it.
 //!
 //! The VDD *driver* is a proprietary, signed binary built by Parsec — it is
 //! not vendored in this repo and this binary does not download or install
-//! it. Install it manually first; see `docs/vdd-setup.md`. Without it,
-//! `VddSession::start` fails and this launcher logs a warning and keeps
-//! running the discovery responder anyway, so module 1 stays testable on a
+//! it. Install it manually first; see `docs/vdd-setup.md`. Without it, a
+//! start-stream request fails (logged, not fatal) and the discovery
+//! responder keeps running regardless, so module 1 stays testable on a
 //! machine that doesn't have the driver yet.
 
 mod capture;
@@ -28,6 +29,13 @@ use std::time::Duration;
 const DISCOVERY_PORT: u16 = 43701;
 const DISCOVERY_REQUEST: &str = "PSYBEACON_DISCOVER_V1";
 const DISCOVERY_REPLY_PREFIX: &str = "PSYBEACON_HOST_V1:";
+/// Sent by a client, over the same discovery socket, after it's resolved a
+/// `HostRoute` and wants the actual video stream: `PSYBEACON_START_STREAM_V1:<port>`,
+/// where `<port>` is the UDP port on the *client* to stream to. The client's
+/// address comes from the packet's source, same non-spoofable pattern as
+/// discovery itself — the message never needs to carry an IP.
+const START_STREAM_PREFIX: &str = "PSYBEACON_START_STREAM_V1:";
+const STREAM_FPS: u32 = 30;
 
 fn main() -> io::Result<()> {
     env_logger::init();
@@ -63,55 +71,24 @@ fn main() -> io::Result<()> {
         .expect("failed to install Ctrl+C handler");
     }
 
-    // Must happen before VddSession::start opens the device — the driver
-    // only reads these registry presets at adapter init. 3840x2160@120 is
-    // the "4K/120Hz" target from the spec; add more (width, height, hz)
-    // tuples here for additional selectable presets (up to 5 total).
-    if let Err(e) = vdd::write_custom_resolutions(&[(3840, 2160, 120)]) {
-        log::warn!(
-            "VDD: couldn't write the custom-resolution registry preset ({e}). \
-             Falling back to the driver's default EDID modes."
-        );
-    }
-
-    let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
-        Ok(session) => {
-            log::info!(
-                "VDD: virtual display {} is up and pinging (driver version: {:?})",
-                session.display_index(),
-                session.driver_version()
-            );
-            Some(session)
-        }
-        Err(e) => {
-            log::warn!(
-                "VDD: couldn't start a virtual display ({e}). Is the driver installed? \
-                 See docs/vdd-setup.md. Continuing without it — discovery still works."
-            );
-            None
-        }
-    };
-
-    // TODO(module 3/4): capture+encode (see `--stream-test` and
-    // capture.rs/encode.rs, verified working standalone) deliberately isn't
-    // wired in here yet — a real host shouldn't spend GPU/encode resources
-    // with no client connected. Once module 4's connection handling exists,
-    // start capturing/encoding when a client actually connects to this
-    // `vdd_session`'s display, and stop (or drop the whole session) when it
-    // disconnects, rather than running unconditionally from startup.
-
-    run_discovery_responder(&shutdown)?;
-
-    drop(vdd_session); // explicit: makes the teardown-on-exit ordering visible
+    // No VddSession here at startup, deliberately: each start-stream
+    // request (see run_stream_session, spawned from run_discovery_responder
+    // below) adds its own display on demand and removes it when the stream
+    // ends. Module 2's original always-on-at-launch VddSession moved into
+    // `--stream-test`, which still wants exactly that behavior for
+    // standalone testing.
+    run_discovery_responder(shutdown)?;
     Ok(())
 }
 
-/// Answers UDP discovery broadcasts from macOS clients on the local subnet.
-/// The client learns our address from the reply packet's source address, so
-/// the payload only needs to carry an identifying token, not our own IP.
-/// Polls `shutdown` between reads so Ctrl+C can unwind `main` (and drop the
-/// `VddSession`) instead of killing the process mid-IOCTL.
-fn run_discovery_responder(shutdown: &AtomicBool) -> io::Result<()> {
+/// Answers UDP discovery broadcasts from macOS clients on the local subnet,
+/// and start-stream requests that follow. The client learns our address
+/// from the reply packet's source address, so neither message needs to
+/// carry an IP. Polls `shutdown` between reads so Ctrl+C can unwind `main`
+/// cleanly; a spawned stream session gets its own clone of `shutdown` so
+/// it, too, stops (and drops its `VddSession`, removing its display) on
+/// Ctrl+C rather than being abandoned when the process exits.
+fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     let socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT))?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -122,6 +99,14 @@ fn run_discovery_responder(shutdown: &AtomicBool) -> io::Result<()> {
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "psybeacon-host".to_string());
     let reply = format!("{DISCOVERY_REPLY_PREFIX}{hostname}");
+
+    // Guards against overlapping stream sessions (e.g. a retried request,
+    // or a second client) stepping on each other — VddSession::start's
+    // settle delay and capture's before/after diffing both assume they're
+    // the only thing adding/removing displays on the adapter at the time.
+    // v1 scope: one stream at a time; a request while already streaming is
+    // logged and ignored rather than queued or replacing the active one.
+    let streaming = Arc::new(AtomicBool::new(false));
 
     let mut buf = [0u8; 512];
     while !shutdown.load(Ordering::Relaxed) {
@@ -136,13 +121,35 @@ fn run_discovery_responder(shutdown: &AtomicBool) -> io::Result<()> {
             }
         };
 
-        if String::from_utf8_lossy(&buf[..len]).trim() != DISCOVERY_REQUEST {
-            continue;
-        }
+        let message = String::from_utf8_lossy(&buf[..len]);
+        let message = message.trim();
 
-        match socket.send_to(reply.as_bytes(), src) {
-            Ok(_) => log::info!("Answered discovery request from {src}"),
-            Err(e) => log::warn!("Failed to reply to {src}: {e}"),
+        if message == DISCOVERY_REQUEST {
+            match socket.send_to(reply.as_bytes(), src) {
+                Ok(_) => log::info!("Answered discovery request from {src}"),
+                Err(e) => log::warn!("Failed to reply to {src}: {e}"),
+            }
+        } else if let Some(port_str) = message.strip_prefix(START_STREAM_PREFIX) {
+            let Ok(client_port) = port_str.parse::<u16>() else {
+                log::warn!("Start-stream request from {src} has an invalid port: {port_str:?}");
+                continue;
+            };
+
+            if streaming.swap(true, Ordering::SeqCst) {
+                log::warn!(
+                    "Start-stream request from {src} ignored — a stream is already active \
+                     (v1 supports one at a time)"
+                );
+                continue;
+            }
+
+            let client_addr = std::net::SocketAddr::new(src.ip(), client_port);
+            let shutdown = shutdown.clone();
+            let streaming = streaming.clone();
+            std::thread::spawn(move || {
+                run_stream_session(&shutdown, client_addr);
+                streaming.store(false, Ordering::SeqCst);
+            });
         }
     }
 
@@ -167,6 +174,86 @@ fn remove_index_and_exit(args: &[String]) -> io::Result<()> {
     vdd::close_device_handle(handle);
     log::info!("VDD: removed display index {index}");
     Ok(())
+}
+
+/// The real thing `stream_test_and_exit` was a standalone rehearsal for:
+/// adds a display, captures it, and NVENC-encodes it to `client_addr` over
+/// raw H.264/UDP, running until `shutdown` is set (Ctrl+C, or the process
+/// exiting) rather than for a fixed duration. Errors at any setup step are
+/// logged and this just returns — a failed stream shouldn't take the whole
+/// launcher down, since the discovery responder should keep answering
+/// other requests regardless.
+fn run_stream_session(shutdown: &AtomicBool, client_addr: std::net::SocketAddr) {
+    let target = format!("udp://{}:{}", client_addr.ip(), client_addr.port());
+    log::info!("Stream: starting for {target}");
+
+    let pre_existing_outputs =
+        capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
+            .unwrap_or_default();
+
+    if let Err(e) = vdd::write_custom_resolutions(&[(3840, 2160, 120)]) {
+        log::warn!("VDD: couldn't write the custom-resolution registry preset ({e}).");
+    }
+
+    let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("Stream: couldn't start a virtual display ({e}) — aborting stream for {target}");
+            return;
+        }
+    };
+    log::info!(
+        "Stream: virtual display {} is up (driver version: {:?})",
+        vdd_session.display_index(),
+        vdd_session.driver_version()
+    );
+
+    let mut duplicator =
+        match capture::DesktopDuplicator::for_new_output(vdd::VDD_ADAPTER_NAME, &pre_existing_outputs) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("Stream: couldn't open capture ({e}) — aborting stream for {target}");
+                return;
+            }
+        };
+    log::info!(
+        "Stream: capturing {}x{}, encoding to {target}",
+        duplicator.width(),
+        duplicator.height()
+    );
+
+    let config = encode::NvencConfig {
+        width: duplicator.width(),
+        height: duplicator.height(),
+        ..encode::NvencConfig::for_1080p(STREAM_FPS)
+    };
+    let mut encoder = match encode::NvencEncoder::spawn(&config, &target) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Stream: couldn't start the encoder ({e}) — aborting stream for {target}");
+            return;
+        }
+    };
+
+    let frame_interval = Duration::from_millis(1000 / STREAM_FPS as u64);
+    while !shutdown.load(Ordering::Relaxed) {
+        match duplicator.capture_next_frame(frame_interval) {
+            Ok(Some(frame)) => {
+                if let Err(e) = encoder.write_frame(&frame.data) {
+                    log::warn!("Stream: write_frame failed, stopping: {e}");
+                    break;
+                }
+            }
+            Ok(None) => {} // static desktop this tick — nothing new to encode
+            Err(e) => log::warn!("Stream: capture tick failed: {e}"),
+        }
+    }
+
+    if let Err(e) = encoder.finish() {
+        log::warn!("Stream: encoder didn't shut down cleanly: {e}");
+    }
+    drop(vdd_session); // explicit: removes the display before this thread ends
+    log::info!("Stream: stopped for {target}");
 }
 
 /// `--stream-test SECONDS [OUTPUT]`: adds a display, captures and NVENC-
