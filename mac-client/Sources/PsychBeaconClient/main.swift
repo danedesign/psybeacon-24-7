@@ -1,26 +1,12 @@
-import Foundation
+import Cocoa
 
-// Temporary CLI entry point for exercising module 1 (network discovery)
-// during early development. Module 4 (macOS Client & Sidecar Portal) will
-// replace this with a real SwiftUI/AppKit app lifecycle that hands the
-// resolved HostRoute to the VideoToolbox/Metal streaming session instead of
-// just printing it.
+// Module 1's discovery CLI test moved out of the app's entry point — it now
+// lives in NetworkDiscovery.swift, unchanged, ready to be called from
+// AppDelegate once module 4 replaces the file-based test harness with the
+// real network path. This entry point boots the actual windowed app.
 
-let discovery = NetworkDiscovery()
-
-Task {
-    do {
-        let route = try await discovery.resolveHostRoute()
-        switch route {
-        case .lan(let host, let port):
-            print("Found host on LAN at \(host):\(port) — using direct P2P connection")
-        case .tailscale(let host, let port):
-            print("No LAN host found; routing via Tailscale mesh IP \(host):\(port)")
-        }
-    } catch {
-        print("Discovery failed: \(error)")
-    }
-    exit(0)
-}
-
-RunLoop.main.run()
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()
