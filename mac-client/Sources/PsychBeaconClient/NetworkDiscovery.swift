@@ -165,7 +165,12 @@ private struct TailscaleStatus: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let peerMap = try container.decode([String: Peer].self, forKey: .peer)
+        // `Peer` is `null` (not an empty object) when the tailnet has no
+        // other devices — confirmed via a real decode failure testing
+        // this against a Mac with no Tailscale peers.
+        // `decodeIfPresent` handles both that and the key being absent
+        // entirely; plain `decode` treated null as a hard error.
+        let peerMap = try container.decodeIfPresent([String: Peer].self, forKey: .peer) ?? [:]
         peers = Array(peerMap.values)
     }
 }
