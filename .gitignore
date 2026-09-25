@@ -11,3 +11,9 @@
 /windows-host/*.mp4
 /windows-host/*.ts
 /windows-host/*.bgra
+
+# Same idea, mac-client side — test clips generated for AppDelegate's
+# playTestFile harness.
+/mac-client/*.h264
+/mac-client/*.mp4
+/mac-client/*.ts

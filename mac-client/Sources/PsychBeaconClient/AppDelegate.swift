@@ -4,9 +4,23 @@ import MetalKit
 
 /// First testable slice of module 4: prove VideoToolbox decode + Metal
 /// render work at all, against a real captured stream, before touching
-/// networking. Pass a path to an .h264/.ts file (e.g. `received-test.ts`,
-/// copied over from the Windows host's `--network-test` run) as the first
+/// networking. Pass a path to an .h264/.ts/.mp4 file as the first
 /// command-line argument.
+///
+/// Verified working 2026-09-25: built and ran on macOS (Swift 5.9 toolchain,
+/// this repo's macOS 13 target), decoding an ffmpeg `testsrc` test pattern
+/// and rendering it correctly (colors, motion, the pattern's counter all
+/// correct — not just "a window appeared"). Two things worth knowing for
+/// next time this needs testing:
+/// - `MTLCreateSystemDefaultDevice`/`NSApplication` need an actual
+///   interactive WindowServer session. Run in a real Terminal window, not
+///   through an automation/agent context that executes commands outside
+///   an interactive GUI session (confirmed: it builds and launches fine
+///   that way, then hangs completely silently — no crash, no output, not
+///   even this file's own synchronous `print` calls — because
+///   `applicationDidFinishLaunching` never actually fires).
+/// - `swift build`/`swift run` in this package don't need Xcode installed,
+///   just the Swift toolchain + macOS SDK.
 ///
 /// TODO(module 4): replace `playTestFile` with the real path — read from
 /// the network (module 1's discovered `HostRoute`) instead of a local file,
