@@ -44,6 +44,10 @@ fn main() -> io::Result<()> {
         Some("--remove-index") => return remove_index_and_exit(&args),
         Some("--stream-test") => return stream_test_and_exit(&args),
         Some("--network-test") => return network_test_and_exit(&args),
+        Some("--diagnose-capture") => {
+            return capture::DesktopDuplicator::diagnose_all_existing_outputs(vdd::VDD_ADAPTER_NAME);
+        }
+        Some("--diagnose-settle") => return diagnose_settle_and_exit(&args),
         _ => {}
     }
 
@@ -233,6 +237,53 @@ fn stream_test_and_exit(args: &[String]) -> io::Result<()> {
     log::info!("Stream test: wrote {frames_written} frames to {output}");
 
     drop(vdd_session); // explicit: removes the display before we exit
+    Ok(())
+}
+
+/// `--diagnose-settle SECONDS`: adds a display, waits `SECONDS` untouched
+/// (no retries, no recreate — just patience), then makes exactly one
+/// capture attempt and reports the raw result before cleaning up.
+///
+/// Exists to test a specific theory in isolation: capture works fine on
+/// `diagnose_all_existing_outputs`'s pre-existing, long-lived display but
+/// fails with `ACCESS_LOST` on one this process just added (see
+/// capture.rs's module doc comment for the full picture) — the one
+/// difference that display has that a freshly-added one doesn't is time to
+/// settle. `capture_next_frame`'s own retry loop only covers ~2.5s total;
+/// this tests whether waiting substantially longer *before the first
+/// attempt* succeeds where recreating duplication faster didn't.
+fn diagnose_settle_and_exit(args: &[String]) -> io::Result<()> {
+    let seconds: u64 = args
+        .get(2)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "usage: --diagnose-settle SECONDS")
+        })?
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SECONDS must be a number"))?;
+
+    let pre_existing_outputs =
+        capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
+            .unwrap_or_default();
+    let vdd_session = vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID)?;
+    log::warn!("Diagnostic: display {} added, waiting {seconds}s before touching it", vdd_session.display_index());
+
+    std::thread::sleep(Duration::from_secs(seconds));
+
+    let mut duplicator =
+        capture::DesktopDuplicator::for_new_output(vdd::VDD_ADAPTER_NAME, &pre_existing_outputs)?;
+    log::warn!("Diagnostic: opened duplication after the wait, attempting one capture");
+
+    match duplicator.capture_next_frame(Duration::from_secs(2)) {
+        Ok(Some(frame)) => log::warn!(
+            "Diagnostic: SUCCESS — captured a {}x{} frame after waiting {seconds}s",
+            frame.width,
+            frame.height
+        ),
+        Ok(None) => log::warn!("Diagnostic: opened fine, no new frame within 2s (static desktop)"),
+        Err(e) => log::warn!("Diagnostic: FAILED even after waiting {seconds}s: {e}"),
+    }
+
+    drop(vdd_session);
     Ok(())
 }
 

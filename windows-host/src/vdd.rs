@@ -470,6 +470,19 @@ impl VddSession {
             );
         }
 
+        // Root-caused via `--diagnose-settle` (see capture.rs's module doc
+        // comment for the full investigation): calling `DuplicateOutput` on
+        // this display too soon after adding it fails with
+        // `DXGI_ERROR_ACCESS_LOST`, and critically, recreating the
+        // duplication interface *afterward* does not recover — whatever
+        // gets wedged by opening too early stays wedged. Waiting before the
+        // *first* open attempt is what actually works; 1s was the smallest
+        // delay tested that succeeded, so 2s is kept here as a margin, not
+        // a measured requirement. This blocks `VddSession::start` itself
+        // (rather than leaving it to capture.rs) so every caller gets a
+        // session that's actually ready to capture from, not just added.
+        std::thread::sleep(Duration::from_secs(2));
+
         let stop_heartbeat = Arc::new(AtomicBool::new(false));
         let heartbeat_thread = {
             let stop = stop_heartbeat.clone();

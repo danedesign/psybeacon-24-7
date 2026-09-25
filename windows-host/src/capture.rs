@@ -16,39 +16,32 @@
 //! snapshot outputs before adding a display, diff after, and only ever open
 //! the one that's actually new.
 //!
-//! Status as of 2026-09-25 — capture is currently broken, parked, not
-//! fixed: `AcquireNextFrame` fails immediately and persistently with
-//! `DXGI_ERROR_ACCESS_LOST` ("the keyed mutex was abandoned"), surviving
-//! `recreate_duplication`'s recovery (recreate + re-extend), elevation
-//! (tested both ways, identical failure), and 2.5s of backoff retries.
-//! `DISPLAY_DEVICE_ACTIVE` reads `true` throughout, so — unlike the
-//! `SetDisplayConfig` issue `recreate_duplication`'s doc comment describes
-//! — this is not the display failing to attach.
+//! Incident note (2026-09-25) — the `ACCESS_LOST` saga, resolved. For a
+//! while, `AcquireNextFrame` failed immediately and persistently with
+//! `DXGI_ERROR_ACCESS_LOST` ("the keyed mutex was abandoned") on any
+//! freshly-added display, surviving `recreate_duplication`'s recovery,
+//! elevation (tested both ways, identical failure), a full `dwm.exe`
+//! restart, and 2.5s of backoff retries — while `DISPLAY_DEVICE_ACTIVE`
+//! read `true` throughout, ruling out the display simply not being
+//! attached. The leading theory at the time (a compositor-level abandoned
+//! keyed mutex, poisoned by an earlier debugging session that force-killed
+//! processes mid-capture — see `vdd.rs`'s incident notes) turned out to be
+//! wrong: the `dwm.exe` restart it predicted would fix this did not.
 //!
-//! Leading theory: a genuinely abandoned `IDXGIKeyedMutex`. Desktop
-//! Duplication's shared surface is synchronized via a keyed mutex between
-//! the compositor and whatever's consuming it; "abandoned" is the specific,
-//! literal meaning of that error text, not just generic HRESULT-to-string
-//! filler — it means whatever held the lock terminated without releasing
-//! it, which poisons the shared resource for every subsequent consumer
-//! regardless of which process asks or with what privilege. This lines up
-//! with the timeline: this started failing only after a debugging session
-//! that force-killed several `psybeacon-host.exe` processes while they
-//! likely held active duplication state (chasing down orphaned displays —
-//! see `vdd.rs`'s incident notes for that whole story). A force-kill runs
-//! no cleanup, so it's a plausible way to leave exactly this behind, on the
-//! *shared* adapter a live session also depends on.
-//!
-//! Fixing a poisoned compositor-level lock needs something that resets it
-//! — restarting `dwm.exe`, disabling/re-enabling the adapter, or a reboot
-//! are the candidates — and all three would visibly disrupt whatever's
-//! currently rendering on this machine, including a live remote session.
-//! Deliberately not attempted without the machine's owner explicitly
-//! choosing to accept that disruption at a time of their choosing — see the
-//! conversation this was debugged in, where acting on a similar theory
-//! about shared state without checking first went wrong once already.
-//! Whoever picks this back up: confirm this theory (or find a better one)
-//! before reaching for a fix that touches shared state again.
+//! The actual cause, found via `--diagnose-capture` (proved duplication
+//! works fine on a long-lived pre-existing display, ruling out anything
+//! session-wide) and `--diagnose-settle` (bisected a real threshold: 1s
+//! wait-then-open succeeded, immediate-open-then-retry never did, even
+//! across 2.5s of retrying): calling `DuplicateOutput` on a display too
+//! soon after `VddAddDisplay` puts it into a state that recreating the
+//! duplication interface *afterward* does not recover from — the delay
+//! has to come **before the first open attempt**, not between retries of
+//! an already-opened one. `VddSession::start` now sleeps 2s (a margin
+//! above the measured 1s minimum, not itself measured) after adding the
+//! display before returning, which is what actually fixes this — not
+//! `recreate_duplication`'s retry loop, which is kept as a safety net for
+//! *later* access loss (lock screen, mode changes) rather than as the
+//! startup fix.
 //!
 //! Not zero-copy yet: `read_back_frame` does a GPU→CPU copy
 //! (`CopyResource` into a staging texture, then `Map`) so the bytes can be
@@ -178,6 +171,46 @@ impl DesktopDuplicator {
                 ),
             )),
         }
+    }
+
+    /// Diagnostic only — never for real capture, use [`for_new_output`] for
+    /// that. Opens duplication on every currently-existing output matching
+    /// `adapter_name_substring`, regardless of who added it, to answer one
+    /// question: does DXGI duplication work *at all* on this adapter right
+    /// now, on a display nobody just modified — or is the whole session
+    /// affected? See capture.rs's module doc comment for the `ACCESS_LOST`
+    /// investigation this exists to narrow down. Read-only: opening a
+    /// duplication interface doesn't affect what's being displayed or any
+    /// other concurrent consumer of the same output (Windows 10+ supports
+    /// multiple simultaneous duplication consumers per output).
+    pub fn diagnose_all_existing_outputs(adapter_name_substring: &str) -> io::Result<()> {
+        let outputs = enumerate_matching_outputs(adapter_name_substring)?;
+        if outputs.is_empty() {
+            log::warn!("Diagnostic: no output found matching \"{adapter_name_substring}\"");
+            return Ok(());
+        }
+
+        for (name, adapter, output) in outputs {
+            log::warn!("Diagnostic: opening duplication on {name} (pre-existing, not ours)");
+            match unsafe { Self::open(&adapter, &output, name.clone()) } {
+                Ok(mut duplicator) => {
+                    match duplicator.capture_next_frame(Duration::from_secs(2)) {
+                        Ok(Some(frame)) => log::warn!(
+                            "Diagnostic: {name} captured a {}x{} frame successfully",
+                            frame.width,
+                            frame.height
+                        ),
+                        Ok(None) => log::warn!(
+                            "Diagnostic: {name} opened fine, no new frame within 2s (static desktop)"
+                        ),
+                        Err(e) => log::warn!("Diagnostic: {name} opened but capture failed: {e}"),
+                    }
+                }
+                Err(e) => log::warn!("Diagnostic: {name} failed to open at all: {e}"),
+            }
+        }
+
+        Ok(())
     }
 
     /// Snapshot of `\\.\DISPLAYN` device names currently on the adapter
