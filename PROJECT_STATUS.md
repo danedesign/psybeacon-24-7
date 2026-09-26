@@ -39,11 +39,13 @@ scrolling still does not work.
   SYSTEM worker in the active console session, restarts it after a session
   change or unexpected exit, and keeps DXGI capture out of Session 0. The
   installer scopes inbound host ports to Tailscale IPv4 addresses and migrates
-  the prior logon task. Build and script parsing pass, but install, reboot,
-  account switching, and lock-screen capture still need live verification on
-  the host PC. This design serves only the active console session, not multiple
-  signed-in desktops simultaneously. Tailscale scoping is not client
-  authentication; tailnet ACLs must restrict trusted peers.
+  the prior logon task. The service is installed and running on the host PC;
+  the log confirms its worker started in console session 1 and bound UDP
+  43701. Mac connectivity, lock-screen capture, sign-out/sign-in transitions,
+  and reboot recovery still need live verification. This design serves only
+  the active console session, not multiple signed-in desktops simultaneously.
+  Tailscale scoping is not client authentication; tailnet ACLs must restrict
+  trusted peers.
 - Both requested display streams are configured for 30 fps each. Actual frame
   delivery has not been measured independently per display.
 
@@ -69,8 +71,8 @@ scrolling still does not work.
 6. **Security and product operation.** Add explicit session authentication
    before exposing the host beyond a restricted private tailnet; package the
    Mac picker as a normal app; then improve setup, configuration, host status,
-   and diagnostics for routine use. The new Windows service has not yet been
-   installed or exercised through reboot, lock, and account switching.
+   and diagnostics for routine use. The Windows service is installed; reboot,
+   lock-screen, and account-switch behavior still need live verification.
 
 ## Current run notes
 
