@@ -303,30 +303,12 @@ impl DesktopDuplicator {
         })
     }
 
-    /// Re-asserts extended-desktop topology, then drops the current
-    /// duplication interface and opens a fresh one on the same output.
-    /// Required after `DXGI_ERROR_ACCESS_LOST`.
-    ///
-    /// Two distinct failure modes both surface as this same error, which is
-    /// why this does both things rather than just recreating duplication:
-    /// a genuinely-attached display whose duplication object died (a
-    /// transient compositor hiccup, e.g. from a lock-screen/secure-desktop
-    /// transition) just needs a fresh `DuplicateOutput` — but a display
-    /// that was never actually attached to the composited desktop in the
-    /// first place (confirmed via `[System.Windows.Forms.Screen]::AllScreens`
-    /// while debugging: it was missing entirely) fails identically, and no
-    /// amount of recreating duplication helps there since the real problem
-    /// is upstream of DXGI. `VddSession::start` already calls
-    /// `vdd::extend_desktop_onto_all_displays` once, but that single call
-    /// isn't reliably sufficient — observed failing silently (no error
-    /// returned, display still absent from `AllScreens`) on a second,
-    /// otherwise-identical run two days after the first fix was verified,
-    /// same machine, same code. Retrying the extend call here as well, on
-    /// every recovery attempt, is what actually closes that gap.
+    /// Drops the current duplication interface and opens a fresh one on the
+    /// same output. Do not reapply display topology here: `SetDisplayConfig`
+    /// can visibly disrupt the user's physical desktop, and repeating it
+    /// during a persistent `ACCESS_LOST` condition creates a recovery loop
+    /// that keeps changing topology without fixing capture.
     fn recreate_duplication(&mut self) -> io::Result<()> {
-        if let Err(e) = crate::vdd::extend_desktop_onto_all_displays() {
-            log::warn!("Capture: re-extend attempt during recovery failed: {e}");
-        }
         log::warn!(
             "Capture: {} DISPLAY_DEVICE_ACTIVE = {}",
             self.device_name,

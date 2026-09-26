@@ -440,7 +440,14 @@ fn run_display_stream(
                 }
             }
             Ok(None) => {} // static desktop this tick — nothing new to encode
-            Err(e) => log::warn!("Stream: capture tick failed: {e}"),
+            Err(e) => {
+                log::warn!("Stream: capture failed after recovery attempts; ending session: {e}");
+                // `capture_next_frame` has already tried bounded recovery.
+                // If it still fails, stop the whole display session rather
+                // than re-entering a persistent ACCESS_LOST loop.
+                client_disconnected.store(true, Ordering::SeqCst);
+                break;
+            }
         }
     }
 
