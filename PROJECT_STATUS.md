@@ -3,71 +3,62 @@
 Last updated: 2026-09-26
 
 PsychBeacon is a macOS client for viewing and controlling a Windows desktop
-through a Parsec virtual display. This file tracks the current working state
-and next steps. See [`TIMELINE.md`](TIMELINE.md) for the chronological history
-and [`AGENTS.md`](AGENTS.md) for architecture details.
+through a Parsec virtual display. This file tracks current work and priorities.
+See [`TIMELINE.md`](TIMELINE.md) for chronological history and [`AGENTS.md`](AGENTS.md)
+for architecture details.
 
 ## Current status
 
-**Single-display streaming and basic remote input work end to end over
-Tailscale.** The user reports that the latest client is substantially more
-stable than the previous version. Trackpad scrolling still does not work, and
-video playback still feels sluggish; both remain on the fix list.
-
-**Display issue under investigation:** the user reported the Windows physical
-main display blinking while streaming. It stopped after the old host process
-was cancelled. At 30 fps, the latest fresh Mac connection negotiated display 0,
-received H.264, and connected the input sidecar. The user has not yet confirmed
-whether the physical display remains stable during streaming.
-
-Latest changes are in commit `8d6ffe9` (`Add text clipboard sync over
-sidecar`). Windows and Mac builds pass. Text clipboard sync was verified in
-both directions over the live Tailscale connection.
+The end-to-end stream works over Tailscale. The host and Mac client support
+multiple independent displays, with each stream configured for 30 fps. The
+user reports the physical Windows display no longer blinks after reloading the
+host with the capture-recovery fix. Video still feels sluggish and trackpad
+scrolling still does not work.
 
 ## Verified
 
-- Windows host adds a Parsec VDD display, captures it, and NVENC-encodes the
-  desktop.
-- Mac client discovers the host through Tailscale, negotiates one display,
-  receives H.264, decodes it with VideoToolbox, and renders it with Metal.
-- Basic mouse and keyboard input reaches the Windows host through the WebSocket
-  sidecar.
-- Plain-text clipboard changes sync in both directions through the sidecar on
-  display 0; tested live over Tailscale. Test strings were removed and the
-  original plain-text clipboard values restored afterward.
-- Mac `swift build` succeeds after the latest client changes.
-- Windows `cargo check` succeeds after the latest host changes.
-- The user restarted the updated Windows host successfully; it reported
-  listening on UDP port 43701.
+- Host discovery through LAN/Tailscale, virtual-display creation, capture,
+  NVENC encoding, Mac H.264 receive/decode, and Metal rendering.
+- Basic mouse and keyboard input through the WebSocket sidecar.
+- Bidirectional plain-text clipboard sync through the first display's sidecar.
+- Host and client compile after multi-display startup and capture-recovery
+  changes (`8978c50`, `b9b6962`).
+- The physical Windows display is stable after reloading the latest host, per
+  the user's report.
+- A tracked Administrator launcher and `--preflight` command now check Cargo,
+  FFmpeg/NVENC, the Parsec VDD driver, and required ports before listening;
+  the new elevated launcher has not yet been run live.
+- Both requested display streams are configured for 30 fps each. Actual frame
+  delivery has not been measured independently per display.
 
-## Implemented, needs live verification
+## Main development priorities
 
-- Host video rate is set to 30 fps while investigating the physical-display
-  blinking report.
-- Mac rendering is requested when a decoded frame arrives; rapid mouse
-  movements are coalesced to reduce stale cursor events.
-- Host accumulates precise trackpad deltas before sending Windows wheel events;
-  the user reports scrolling still does not work, so the path needs diagnosis.
-- Pinch magnification is mapped to Windows Ctrl+wheel zoom.
+1. **Video performance and refresh rate.** Playback feels sluggish. Measure
+   capture, GPU readback, NVENC, UDP delivery, decode, and render pacing. Fix
+   the bottleneck before raising the current 30 fps target; then evaluate
+   60/120 fps and two-stream load.
+2. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
+   gesture capture through the WebSocket and Windows wheel injection. Confirm
+   pinch-to-zoom in a real Windows application.
+3. **Multi-display reliability.** Verify independent video and input on each
+   display, reconnect behavior, and cleanup of virtual displays after normal
+   disconnects and capture failures. Current two-display support has just been
+   exercised in the user's setup; longer stability and per-display input still
+   need confirmation.
+4. **Transport resilience.** Video is raw H.264 over UDP without packet
+   sequencing or retransmission. Add loss detection and a recovery strategy so
+   one lost packet does not leave decoding damaged until reconnect.
+5. **Clipboard scope.** Text sync works in both directions. Rich content such
+   as images and files, plus clipboard history, remains future work.
+6. **Security and product operation.** Add an explicit session/authentication
+   model before exposing the host beyond the private tailnet; then improve
+   setup, configuration, launch/restart, and diagnostics for routine use.
 
-## Open work
+## Current run notes
 
-1. **Physical display blinking:** idle host is stable; the latest 30 fps stream started successfully; confirm monitor stability
-   and stop with Ctrl+C if blinking returns. The cause is not confirmed yet.
-2. **Video performance:** playback still feels sluggish. Investigate capture,
-   encoding, UDP receive, decode, and render pacing before increasing frame rate.
-3. **Trackpad scrolling:** still not working after host-side wheel-delta
-   accumulation; diagnose the macOS event, WebSocket payload, and Windows input
-   path with targeted logging.
-4. **Pinch zoom:** implemented as Ctrl+wheel, but not yet confirmed in a target
-   Windows application.
-5. **Multi-display:** code supports multiple displays, but only one display has
-   been exercised in the user's live setup.
-6. **Video transport resilience:** raw H.264 over UDP has no sequence numbers
-   or retransmission; packet loss can damage decoding until reconnect.
-
-## Current connection note
-
-The LAN can reply from a stale host address. For this setup, launch the Mac
-client with `PSYBEACON_TARGET_HOST=desktop-1aachgk` to route directly over
-Tailscale and avoid the stale LAN discovery response.
+- Both stream targets are configured for 30 fps; this is a cap/target, not a
+  measured guarantee of delivered frames.
+- For this setup, use `PSYBEACON_TARGET_HOST=desktop-1aachgk` to avoid stale LAN
+  discovery and route over Tailscale.
+- Trackpad scrolling and sluggish playback remain the highest-priority user
+  issues.

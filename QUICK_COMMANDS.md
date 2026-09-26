@@ -2,11 +2,15 @@
 
 ## Start the Windows host
 
-Open **Administrator PowerShell** and run:
+Open **Administrator PowerShell** at the repository root and run:
 
 ```powershell
-& "C:\Users\headradio\Documents\Codex\2026-09-26\ins\work\psybeacon-24-7\windows-host\tools\run-host-admin.ps1"
+& ".\windows-host\scripts\run-host-admin.ps1"
 ```
+
+The launcher now checks elevation, Cargo, FFmpeg/NVENC availability, the
+Parsec VDD driver, and the host's UDP/TCP ports before it starts listening.
+If a check fails, it prints the specific item to fix and exits.
 
 Leave that window open. The startup message should say it is listening on UDP
 port `43701`.
@@ -45,6 +49,13 @@ Mac Terminal, from `mac-client`:
 
 ```sh
 swift build
+```
+
+To run the Windows checks without starting the listener, use this from an
+Administrator PowerShell in `windows-host`:
+
+```powershell
+cargo run -- --preflight
 ```
 
 ## Check Windows listeners

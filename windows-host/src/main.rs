@@ -23,7 +23,8 @@ mod sidecar;
 mod vdd;
 
 use std::io;
-use std::net::UdpSocket;
+use std::net::{TcpListener, UdpSocket};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,6 +93,7 @@ fn main() -> io::Result<()> {
     // no discovery responder).
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--preflight") => return preflight_and_exit(),
         Some("--remove-index") => return remove_index_and_exit(&args),
         Some("--stream-test") => return stream_test_and_exit(&args),
         Some("--network-test") => return network_test_and_exit(&args),
@@ -121,6 +123,58 @@ fn main() -> io::Result<()> {
     // `--stream-test`, which still wants exactly that behavior for
     // standalone testing.
     run_discovery_responder(shutdown)?;
+    Ok(())
+}
+
+/// Checks runtime dependencies and listener ports without adding a display.
+/// The admin launcher runs this before starting the host so common setup
+/// failures are reported before the client is asked to connect.
+fn preflight_and_exit() -> io::Result<()> {
+    let ffmpeg = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()?;
+    if !ffmpeg.status.success() {
+        return Err(io::Error::other("ffmpeg -encoders exited unsuccessfully"));
+    }
+    let encoders = String::from_utf8_lossy(&ffmpeg.stdout);
+    if !encoders.lines().any(|line| line.contains("h264_nvenc")) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "FFmpeg is available, but its h264_nvenc encoder is missing",
+        ));
+    }
+
+    let handle = vdd::open_device_handle(&vdd::VDD_ADAPTER_GUID).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("couldn't open the Parsec VDD device; check driver installation and Administrator privileges: {e}"),
+        )
+    })?;
+    let driver_version = match vdd::vdd_version(handle) {
+        Ok(version) => version,
+        Err(e) => {
+            vdd::close_device_handle(handle);
+            return Err(e);
+        }
+    };
+    vdd::close_device_handle(handle);
+
+    let _control_socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("UDP port {DISCOVERY_PORT} is unavailable; is another host already running?: {e}"),
+        )
+    })?;
+    let mut sidecar_sockets = Vec::new();
+    for port in SIDECAR_PORT..SIDECAR_PORT + MAX_DISPLAY_COUNT {
+        sidecar_sockets.push(TcpListener::bind(("0.0.0.0", port)).map_err(|e| {
+            io::Error::new(e.kind(), format!("input sidecar port {port} is unavailable: {e}"))
+        })?);
+    }
+
+    log::info!(
+        "Preflight passed: Parsec VDD driver v{driver_version}, FFmpeg h264_nvenc, UDP control and all sidecar ports available"
+    );
     Ok(())
 }
 

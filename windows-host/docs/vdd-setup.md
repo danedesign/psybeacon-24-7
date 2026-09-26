@@ -54,6 +54,15 @@ With the driver installed and the process elevated, you should see
 the fallback warnings, and a new display should appear in Windows' Display
 Settings.
 
+The normal admin launcher runs `cargo run -- --preflight` before starting the
+listener. This checks that the VDD device responds, FFmpeg includes NVENC, and
+the discovery and sidecar ports are available. To run that check manually
+without starting the listener:
+
+```
+cargo run -- --preflight
+```
+
 **Confirmed working 2026-09-22** against driver v0.45.0.0 (`driver version: Ok(45)`
 in the log) — full sequence: registry preset write, device open, add-display,
 heartbeat, version query. If you hit `ERROR_INVALID_PARAMETER` from
