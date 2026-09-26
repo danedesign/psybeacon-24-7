@@ -17,15 +17,18 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, DuplicateTokenEx, LookupPrivilegeValueW, SecurityImpersonation,
-    SetTokenInformation, TokenPrimary, TokenSessionId, LUID_AND_ATTRIBUTES,
-    SE_ASSIGNPRIMARYTOKEN_NAME, SE_INCREASE_QUOTA_NAME, SE_PRIVILEGE_ENABLED, SE_TCB_NAME,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-    TOKEN_PRIVILEGES, TOKEN_QUERY,
+    TokenPrimary, LUID_AND_ATTRIBUTES, SE_ASSIGNPRIMARYTOKEN_NAME, SE_DEBUG_NAME,
+    SE_INCREASE_QUOTA_NAME, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessAsUserW, GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    STARTUPINFOW,
 };
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -174,42 +177,14 @@ impl DesktopWorker {
             )
         })?;
 
-        let process_token = open_system_process_token()
+        // Keep the CreateProcessAsUser privileges enabled on the service
+        // token, but borrow a SYSTEM token that already belongs to the target
+        // session. Mutating TokenSessionId on a duplicate of the Session 0
+        // service token is denied on some Windows configurations even when
+        // SeTcbPrivilege is present.
+        let _service_token = open_system_process_token()
             .map_err(|error| stage_error("opening/enabling the LocalSystem token", error))?;
-        let access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID;
-        let mut primary_token = HANDLE::default();
-        unsafe {
-            DuplicateTokenEx(
-                process_token.0,
-                access,
-                None,
-                SecurityImpersonation,
-                TokenPrimary,
-                &mut primary_token,
-            )
-        }
-        .map_err(|error| {
-            stage_error(
-                "duplicating the LocalSystem primary token",
-                windows_error(error),
-            )
-        })?;
-        let primary_token = OwnedHandle(primary_token);
-
-        unsafe {
-            SetTokenInformation(
-                primary_token.0,
-                TokenSessionId,
-                (&session_id as *const u32).cast(),
-                std::mem::size_of::<u32>() as u32,
-            )
-        }
-        .map_err(|error| {
-            stage_error(
-                "assigning the console session to the worker token",
-                windows_error(error),
-            )
-        })?;
+        let primary_token = open_session_system_token(session_id)?;
 
         let mut command_line = OsString::from("\"");
         command_line.push(&executable);
@@ -260,20 +235,16 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
     unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_QUERY
-                | TOKEN_DUPLICATE
-                | TOKEN_ASSIGN_PRIMARY
-                | TOKEN_ADJUST_SESSIONID
-                | TOKEN_ADJUST_PRIVILEGES,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_PRIVILEGES,
             &mut token,
         )
     }
     .map_err(|error| stage_error("opening the service process token", windows_error(error)))?;
     let token = OwnedHandle(token);
     for (name, display_name) in [
-        (SE_TCB_NAME, "SeTcbPrivilege"),
         (SE_ASSIGNPRIMARYTOKEN_NAME, "SeAssignPrimaryTokenPrivilege"),
         (SE_INCREASE_QUOTA_NAME, "SeIncreaseQuotaPrivilege"),
+        (SE_DEBUG_NAME, "SeDebugPrivilege"),
     ] {
         let mut luid = windows::Win32::Foundation::LUID::default();
         unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid) }.map_err(|error| {
@@ -302,6 +273,95 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
         }
     }
     Ok(token)
+}
+
+fn open_session_system_token(session_id: u32) -> io::Result<OwnedHandle> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|error| stage_error("enumerating Windows processes", windows_error(error)))?;
+    let snapshot = OwnedHandle(snapshot);
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    unsafe { Process32FirstW(snapshot.0, &mut entry) }
+        .map_err(|error| stage_error("reading the Windows process list", windows_error(error)))?;
+
+    loop {
+        let executable = String::from_utf16_lossy(
+            &entry.szExeFile[..entry
+                .szExeFile
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(entry.szExeFile.len())],
+        );
+        if executable.eq_ignore_ascii_case("winlogon.exe") {
+            let mut process_session = 0;
+            unsafe {
+                windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(
+                    entry.th32ProcessID,
+                    &mut process_session,
+                )
+            }
+            .map_err(|error| stage_error("checking the Winlogon session", windows_error(error)))?;
+            if process_session == session_id {
+                let process = unsafe {
+                    OpenProcess(
+                        PROCESS_QUERY_LIMITED_INFORMATION,
+                        false,
+                        entry.th32ProcessID,
+                    )
+                }
+                .map_err(|error| {
+                    stage_error(
+                        "opening the active session's Winlogon process",
+                        windows_error(error),
+                    )
+                })?;
+                let process = OwnedHandle(process);
+                let mut source_token = HANDLE::default();
+                unsafe {
+                    OpenProcessToken(
+                        process.0,
+                        TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+                        &mut source_token,
+                    )
+                }
+                .map_err(|error| {
+                    stage_error(
+                        "opening the active session's SYSTEM token",
+                        windows_error(error),
+                    )
+                })?;
+                let source_token = OwnedHandle(source_token);
+                let access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY;
+                let mut primary_token = HANDLE::default();
+                unsafe {
+                    DuplicateTokenEx(
+                        source_token.0,
+                        access,
+                        None,
+                        SecurityImpersonation,
+                        TokenPrimary,
+                        &mut primary_token,
+                    )
+                }
+                .map_err(|error| {
+                    stage_error(
+                        "duplicating the active session's SYSTEM token",
+                        windows_error(error),
+                    )
+                })?;
+                return Ok(OwnedHandle(primary_token));
+            }
+        }
+
+        if unsafe { Process32NextW(snapshot.0, &mut entry) }.is_err() {
+            break;
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("couldn't find winlogon.exe in active console session {session_id}"),
+    ))
 }
 
 fn stop_worker(worker: DesktopWorker) {
