@@ -4,21 +4,28 @@
 
 ## One-time setup
 
-Close any currently running host started in a PowerShell window with **Ctrl+C**
-once. Then open **Administrator PowerShell** at the repository root and run:
+Open **Administrator PowerShell** at the repository root and run:
 
 ```powershell
-& ".\windows-host\scripts\install-host-task.ps1"
+& ".\windows-host\scripts\install-host-service.ps1"
 ```
 
-This installs and starts a hidden Scheduled Task for the signed-in Windows
-user. It starts at each sign-in and runs in that user's interactive desktop
-session, which DXGI capture needs. The first run checks elevation, Cargo,
-FFmpeg/NVENC, the Parsec VDD driver, and the required ports. Logs go to
-`%LOCALAPPDATA%\PsychBeacon\logs\host.log`.
+This builds and installs the host as an **Automatic LocalSystem Windows
+service**, then starts it. The service supervises a worker in the active
+console session, so the host can remain available at the Windows sign-in/lock
+screen and when a different account is signed in. It supports the active
+console session only; it does not serve multiple signed-in Windows desktops
+at the same time. The installer checks elevation, Cargo, FFmpeg/NVENC, the
+Parsec VDD driver, and required ports. Logs go to
+`%ProgramData%\PsychBeacon\logs\host.log`.
 
-The host should now stay available while you use that Windows account. It is a
-scheduled task, not a Windows service; it needs the user to be signed in.
+Inbound discovery and sidecar firewall rules are restricted to Tailscale IPv4
+addresses (`100.64.0.0/10`). This is network scoping, not user authentication;
+keep the tailnet ACL limited to trusted devices.
+
+The service starts at boot and does not require an account to stay signed in.
+The active display/lock-screen behavior still needs live verification on this
+PC after installation.
 
 To stop the listener and clean up the active display:
 
@@ -26,10 +33,17 @@ To stop the listener and clean up the active display:
 & ".\windows-host\scripts\stop-host.ps1"
 ```
 
-To remove the automatic startup task:
+To remove the service and installed host files:
 
 ```powershell
-& ".\windows-host\scripts\uninstall-host-task.ps1"
+& ".\windows-host\scripts\uninstall-host-service.ps1"
+```
+
+Check service state and recent logs with:
+
+```powershell
+Get-Service PsychBeaconHost
+Get-Content "$env:ProgramData\PsychBeacon\logs\host.log" -Tail 80
 ```
 
 Avoid force-killing `psybeacon-host.exe`; use the graceful stop command.

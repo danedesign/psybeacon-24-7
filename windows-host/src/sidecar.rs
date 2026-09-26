@@ -20,9 +20,9 @@ use serde::Deserialize;
 use tungstenite::Message;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    VIRTUAL_KEY,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
@@ -71,6 +71,7 @@ pub fn run_sidecar_server(
     bounds: DisplayBounds,
     shutdown: &AtomicBool,
     client_disconnected: &AtomicBool,
+    tailscale_only: bool,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     listener.set_nonblocking(true)?;
@@ -80,14 +81,13 @@ pub fn run_sidecar_server(
     while !shutdown.load(Ordering::Relaxed) && !client_disconnected.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, addr)) => {
+                if tailscale_only && !crate::is_tailscale_ip(addr.ip()) {
+                    log::warn!("Sidecar: rejecting non-tailnet connection from {addr}");
+                    continue;
+                }
                 log::info!("Sidecar: connection from {addr}");
-                let connected = handle_connection(
-                    stream,
-                    bounds,
-                    port == 43703,
-                    shutdown,
-                    client_disconnected,
-                );
+                let connected =
+                    handle_connection(stream, bounds, port == 43703, shutdown, client_disconnected);
                 log::info!("Sidecar: connection from {addr} ended");
                 if connected {
                     client_disconnected.store(true, Ordering::SeqCst);
@@ -133,7 +133,10 @@ fn handle_connection(
         }
     };
 
-    if let Err(e) = socket.get_ref().set_read_timeout(Some(Duration::from_millis(200))) {
+    if let Err(e) = socket
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(200)))
+    {
         log::warn!("Sidecar: couldn't set a read timeout, shutdown may be delayed: {e}");
     }
 
@@ -180,7 +183,9 @@ fn handle_connection(
                                     break;
                                 }
                             }
-                            Err(error) => log::warn!("Sidecar: couldn't encode clipboard update: {error}"),
+                            Err(error) => {
+                                log::warn!("Sidecar: couldn't encode clipboard update: {error}")
+                            }
                         }
                     }
                 }
@@ -191,7 +196,10 @@ fn handle_connection(
             Ok(Message::Text(text))
                 if text.len() > crate::clipboard::MAX_CLIPBOARD_BYTES * 6 + 256 =>
             {
-                log::warn!("Sidecar: ignoring oversized input message ({} bytes)", text.len());
+                log::warn!(
+                    "Sidecar: ignoring oversized input message ({} bytes)",
+                    text.len()
+                );
             }
             Ok(Message::Text(text)) => match serde_json::from_str::<InputEvent>(&text) {
                 Ok(InputEvent::Scroll { delta_x, delta_y }) => {
@@ -202,22 +210,35 @@ fn handle_connection(
                     scroll_remainder_x -= whole_x;
                     scroll_remainder_y -= whole_y;
                     if whole_x != 0.0 || whole_y != 0.0 {
-                        inject(InputEvent::Scroll { delta_x: whole_x, delta_y: whole_y }, bounds);
+                        inject(
+                            InputEvent::Scroll {
+                                delta_x: whole_x,
+                                delta_y: whole_y,
+                            },
+                            bounds,
+                        );
                     }
                 }
                 Ok(InputEvent::Clipboard { text }) if clipboard_enabled => {
                     if text.len() <= crate::clipboard::MAX_CLIPBOARD_BYTES {
-                        if let Some(current) = crate::clipboard::read_text(clipboard_owner.unwrap()) {
+                        if let Some(current) = crate::clipboard::read_text(clipboard_owner.unwrap())
+                        {
                             if current != text {
-                                match crate::clipboard::write_text(clipboard_owner.unwrap(), &text) {
+                                match crate::clipboard::write_text(clipboard_owner.unwrap(), &text)
+                                {
                                     Ok(()) => {
                                         last_client_clipboard = Some(text);
-                                        last_clipboard_sequence = crate::clipboard::sequence_number();
+                                        last_clipboard_sequence =
+                                            crate::clipboard::sequence_number();
                                     }
-                                    Err(error) => log::warn!("Sidecar: couldn't update Windows clipboard: {error}"),
+                                    Err(error) => log::warn!(
+                                        "Sidecar: couldn't update Windows clipboard: {error}"
+                                    ),
                                 }
                             }
-                        } else if let Err(error) = crate::clipboard::write_text(clipboard_owner.unwrap(), &text) {
+                        } else if let Err(error) =
+                            crate::clipboard::write_text(clipboard_owner.unwrap(), &text)
+                        {
                             log::warn!("Sidecar: couldn't update Windows clipboard: {error}");
                         } else {
                             last_client_clipboard = Some(text);
@@ -238,7 +259,10 @@ fn handle_connection(
             }
             Ok(_) => {} // binary/ping/pong — not used, ignored
             Err(tungstenite::Error::Io(ref e))
-                if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
             {
                 continue;
             }
@@ -342,7 +366,11 @@ fn send_key(vk_code: u16, key_up: bool) {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(vk_code),
                 wScan: 0,
-                dwFlags: if key_up { KEYEVENTF_KEYUP } else { Default::default() },
+                dwFlags: if key_up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },

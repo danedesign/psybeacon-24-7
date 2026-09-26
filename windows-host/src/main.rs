@@ -19,6 +19,7 @@
 mod capture;
 mod clipboard;
 mod encode;
+mod service;
 mod sidecar;
 mod vdd;
 
@@ -84,7 +85,8 @@ struct DisplayInfo {
 }
 
 fn main() -> io::Result<()> {
-    env_logger::init();
+    init_logging();
+    configure_ffmpeg_path();
 
     // Maintenance escape hatch: a process that gets force-killed (e.g. a
     // dev session that didn't shut down cleanly) skips VddSession's Drop,
@@ -95,22 +97,30 @@ fn main() -> io::Result<()> {
     // no discovery responder).
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--service") => return service::run_dispatcher().map_err(io::Error::other),
+        Some("--worker") => return run_host(true, false),
         Some("--preflight") => return preflight_and_exit(),
         Some("--stop") => return request_stop_and_exit(),
         Some("--remove-index") => return remove_index_and_exit(&args),
         Some("--stream-test") => return stream_test_and_exit(&args),
         Some("--network-test") => return network_test_and_exit(&args),
         Some("--diagnose-capture") => {
-            return capture::DesktopDuplicator::diagnose_all_existing_outputs(vdd::VDD_ADAPTER_NAME);
+            return capture::DesktopDuplicator::diagnose_all_existing_outputs(
+                vdd::VDD_ADAPTER_NAME,
+            );
         }
         Some("--diagnose-settle") => return diagnose_settle_and_exit(&args),
         _ => {}
     }
 
-    log::info!("PsychBeacon host launcher starting");
+    run_host(false, true)
+}
+
+fn run_host(tailscale_only: bool, install_ctrlc_handler: bool) -> io::Result<()> {
+    log::info!("PsychBeacon host worker starting");
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    {
+    if install_ctrlc_handler {
         let shutdown = shutdown.clone();
         ctrlc::set_handler(move || {
             log::info!("Shutdown requested (Ctrl+C)");
@@ -125,8 +135,82 @@ fn main() -> io::Result<()> {
     // ends. Module 2's original always-on-at-launch VddSession moved into
     // `--stream-test`, which still wants exactly that behavior for
     // standalone testing.
-    run_discovery_responder(shutdown)?;
+    run_discovery_responder(shutdown, tailscale_only)?;
     Ok(())
+}
+
+fn init_logging() {
+    let service_mode = std::env::args().any(|arg| arg == "--service" || arg == "--worker");
+    let log_path = std::env::var_os("PSYBEACON_LOG_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| service_mode.then(default_service_log_path));
+    if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let mut builder =
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+            builder
+                .target(env_logger::Target::Pipe(Box::new(file)))
+                .init();
+            return;
+        }
+        eprintln!("Couldn't open PsychBeacon host log at {}", path.display());
+    }
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+}
+
+fn default_service_log_path() -> std::path::PathBuf {
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    program_data
+        .join("PsychBeacon")
+        .join("logs")
+        .join("host.log")
+}
+
+fn configure_ffmpeg_path() {
+    let configured = std::env::var_os("PSYBEACON_FFMPEG_DIR").map(std::path::PathBuf::from);
+    let program_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    let configured_file =
+        std::fs::read_to_string(program_data.join("PsychBeacon").join("ffmpeg-path.txt"))
+            .ok()
+            .map(|path| std::path::PathBuf::from(path.trim().trim_start_matches('\u{feff}')));
+    let inferred = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()?
+                .parent()?
+                .parent()
+                .map(|root| root.to_path_buf())
+        })
+        .map(|root| {
+            root.join("tools")
+                .join("ffmpeg-7.1.5")
+                .join("ffmpeg-n7.1.5-12-g1fdbca85aa-win64-gpl-7.1")
+                .join("bin")
+        });
+    if let Some(directory) = configured
+        .or(configured_file)
+        .or(inferred)
+        .filter(|path| path.is_dir())
+    {
+        let mut paths = vec![std::path::PathBuf::from(directory)];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            std::env::set_var("PATH", joined);
+        }
+    }
 }
 
 /// Checks runtime dependencies and listener ports without adding a display.
@@ -165,13 +249,18 @@ fn preflight_and_exit() -> io::Result<()> {
     let _control_socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("UDP port {DISCOVERY_PORT} is unavailable; is another host already running?: {e}"),
+            format!(
+                "UDP port {DISCOVERY_PORT} is unavailable; is another host already running?: {e}"
+            ),
         )
     })?;
     let mut sidecar_sockets = Vec::new();
     for port in SIDECAR_PORT..SIDECAR_PORT + MAX_DISPLAY_COUNT {
         sidecar_sockets.push(TcpListener::bind(("0.0.0.0", port)).map_err(|e| {
-            io::Error::new(e.kind(), format!("input sidecar port {port} is unavailable: {e}"))
+            io::Error::new(
+                e.kind(),
+                format!("input sidecar port {port} is unavailable: {e}"),
+            )
         })?);
     }
 
@@ -188,7 +277,7 @@ fn preflight_and_exit() -> io::Result<()> {
 /// cleanly; a spawned stream session gets its own clone of `shutdown` so
 /// it, too, stops (and drops its `VddSession`, removing its display) on
 /// Ctrl+C rather than being abandoned when the process exits.
-fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
+fn run_discovery_responder(shutdown: Arc<AtomicBool>, tailscale_only: bool) -> io::Result<()> {
     let socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT))?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -213,7 +302,12 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     while !shutdown.load(Ordering::Relaxed) {
         let (len, src) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
                 continue
             }
             Err(e) => {
@@ -224,6 +318,14 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
 
         let message = String::from_utf8_lossy(&buf[..len]);
         let message = message.trim();
+
+        if tailscale_only
+            && !is_tailscale_ip(src.ip())
+            && src.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        {
+            log::warn!("Ignoring non-tailnet request from {src}");
+            continue;
+        }
 
         if message == STOP_REQUEST && src.ip().is_loopback() {
             log::info!("Local stop requested from {src}");
@@ -241,13 +343,15 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
                 continue;
             };
             let display_count: u16 = match parts.next() {
-                Some(count_str) => match count_str.parse() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        log::warn!("Start-stream request from {src} has an invalid count: {count_str:?}");
-                        continue;
+                Some(count_str) => {
+                    match count_str.parse() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            log::warn!("Start-stream request from {src} has an invalid count: {count_str:?}");
+                            continue;
+                        }
                     }
-                },
+                }
                 None => 1,
             };
             let display_count = display_count.clamp(1, MAX_DISPLAY_COUNT);
@@ -261,14 +365,23 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
             }
 
             let Ok(reply_socket) = socket.try_clone() else {
-                log::warn!("Start-stream request from {src}: couldn't clone the socket to reply on");
+                log::warn!(
+                    "Start-stream request from {src}: couldn't clone the socket to reply on"
+                );
                 streaming.store(false, Ordering::SeqCst);
                 continue;
             };
             let shutdown = shutdown.clone();
             let streaming = streaming.clone();
             active_session = Some(std::thread::spawn(move || {
-                run_multi_stream_session(&shutdown, &reply_socket, src, base_port, display_count);
+                run_multi_stream_session(
+                    &shutdown,
+                    &reply_socket,
+                    src,
+                    base_port,
+                    display_count,
+                    tailscale_only,
+                );
                 streaming.store(false, Ordering::SeqCst);
             }));
         }
@@ -283,8 +396,18 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     Ok(())
 }
 
+fn is_tailscale_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            let octets = address.octets();
+            octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
 /// Sends a loopback-only graceful stop request to the resident host process.
-fn request_stop_and_exit() -> io::Result<()> {
+pub(crate) fn request_stop_and_exit() -> io::Result<()> {
     let socket = UdpSocket::bind(("127.0.0.1", 0))?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.send_to(STOP_REQUEST.as_bytes(), ("127.0.0.1", DISCOVERY_PORT))?;
@@ -331,6 +454,7 @@ fn run_multi_stream_session(
     client_src: std::net::SocketAddr,
     base_port: u16,
     display_count: u16,
+    tailscale_only: bool,
 ) {
     log::info!("Multi-stream: request from {client_src} for {display_count} display(s)");
 
@@ -354,20 +478,19 @@ fn run_multi_stream_session(
             }
         };
 
-        let output_name =
-            match capture::DesktopDuplicator::new_output_name(
-                vdd::VDD_ADAPTER_NAME,
-                &pre_existing_outputs,
-            ) {
-                Ok(name) => name,
-                Err(e) => {
-                    log::warn!(
-                        "Multi-stream: couldn't open capture for display {index} ({e}) — \
+        let output_name = match capture::DesktopDuplicator::new_output_name(
+            vdd::VDD_ADAPTER_NAME,
+            &pre_existing_outputs,
+        ) {
+            Ok(name) => name,
+            Err(e) => {
+                log::warn!(
+                    "Multi-stream: couldn't open capture for display {index} ({e}) — \
                          stopping at {index} of {display_count}"
-                    );
-                    break;
-                }
-            };
+                );
+                break;
+            }
+        };
 
         log::info!(
             "Multi-stream: display {index} virtual display {} is up (driver version: {:?})",
@@ -406,7 +529,12 @@ fn run_multi_stream_session(
         };
         log::info!(
             "Multi-stream: display {index} up: {}x{} at ({}, {}), stream_port={}, sidecar_port={}",
-            info.width, info.height, info.left, info.top, info.stream_port, info.sidecar_port
+            info.width,
+            info.height,
+            info.left,
+            info.top,
+            info.stream_port,
+            info.sidecar_port
         );
         sessions.push((vdd_session, duplicator, info));
     }
@@ -444,6 +572,7 @@ fn run_multi_stream_session(
                         duplicator,
                         target,
                         sidecar_port,
+                        tailscale_only,
                     );
                 })
             })
@@ -470,6 +599,7 @@ fn run_display_stream(
     mut duplicator: capture::DesktopDuplicator,
     target: String,
     sidecar_port: u16,
+    tailscale_only: bool,
 ) {
     log::info!(
         "Stream: capturing {}x{}, encoding to {target}",
@@ -504,6 +634,7 @@ fn run_display_stream(
                 bounds,
                 &sidecar_shutdown,
                 &client_disconnected,
+                tailscale_only,
             ) {
                 log::warn!("Sidecar: server failed on port {sidecar_port}: {e}");
                 client_disconnected.store(true, Ordering::SeqCst);
@@ -560,7 +691,10 @@ fn stream_test_and_exit(args: &[String]) -> io::Result<()> {
     let seconds: u64 = args
         .get(2)
         .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "usage: --stream-test SECONDS [OUTPUT]")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: --stream-test SECONDS [OUTPUT]",
+            )
         })?
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SECONDS must be a number"))?;
@@ -636,7 +770,10 @@ fn diagnose_settle_and_exit(args: &[String]) -> io::Result<()> {
     let seconds: u64 = args
         .get(2)
         .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "usage: --diagnose-settle SECONDS")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usage: --diagnose-settle SECONDS",
+            )
         })?
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SECONDS must be a number"))?;
@@ -645,7 +782,10 @@ fn diagnose_settle_and_exit(args: &[String]) -> io::Result<()> {
         capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
             .unwrap_or_default();
     let vdd_session = vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID)?;
-    log::warn!("Diagnostic: display {} added, waiting {seconds}s before touching it", vdd_session.display_index());
+    log::warn!(
+        "Diagnostic: display {} added, waiting {seconds}s before touching it",
+        vdd_session.display_index()
+    );
 
     std::thread::sleep(Duration::from_secs(seconds));
 

@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27
 
 PsychBeacon is a macOS client for viewing and controlling a Windows desktop
 through a Parsec virtual display. This file tracks current work and priorities.
@@ -35,11 +35,15 @@ scrolling still does not work.
   floating Disconnect control should close every stream receiver and sidecar,
   return to the picker, and allow a new connection. This lifecycle change needs
   a live reconnect check.
-- Windows can now be installed as a hidden elevated Scheduled Task at user
-  sign-in, in the interactive desktop session needed by DXGI capture. A local
-  graceful-stop command lets it end active streams and remove virtual displays.
-  Task install/start/stop has not yet been run live; it is not a Session 0
-  service and requires the user to be signed in.
+- Windows now has an Automatic LocalSystem service supervisor. It launches a
+  SYSTEM worker in the active console session, restarts it after a session
+  change or unexpected exit, and keeps DXGI capture out of Session 0. The
+  installer scopes inbound host ports to Tailscale IPv4 addresses and migrates
+  the prior logon task. Build and script parsing pass, but install, reboot,
+  account switching, and lock-screen capture still need live verification on
+  the host PC. This design serves only the active console session, not multiple
+  signed-in desktops simultaneously. Tailscale scoping is not client
+  authentication; tailnet ACLs must restrict trusted peers.
 - Both requested display streams are configured for 30 fps each. Actual frame
   delivery has not been measured independently per display.
 
@@ -62,11 +66,11 @@ scrolling still does not work.
    one lost packet does not leave decoding damaged until reconnect.
 5. **Clipboard scope.** Text sync works in both directions. Rich content such
    as images and files, plus clipboard history, remains future work.
-6. **Security and product operation.** Add an explicit session/authentication
-   model before exposing the host beyond the private tailnet; package the Mac
-   picker as a normal app; then improve setup, configuration, host status, and
-   restart/diagnostics for routine use. The Windows host still runs separately
-   with Administrator privileges through a logon task.
+6. **Security and product operation.** Add explicit session authentication
+   before exposing the host beyond a restricted private tailnet; package the
+   Mac picker as a normal app; then improve setup, configuration, host status,
+   and diagnostics for routine use. The new Windows service has not yet been
+   installed or exercised through reboot, lock, and account switching.
 
 ## Current run notes
 
