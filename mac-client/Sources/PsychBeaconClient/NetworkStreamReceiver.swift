@@ -7,15 +7,18 @@ import Darwin
 enum NetworkStreamError: Error {
     case socketCreationFailed
     case bindFailed
-    case sendFailed
 }
 
-/// Requests the video stream from the host and receives it: sends
-/// `PSYBEACON_START_STREAM_V1:<port>` to the host's discovery port (see
-/// `main.rs`'s `run_discovery_responder` on the Windows side for the other
-/// end of this), then listens on `port` for the raw H.264/UDP stream
-/// `encode.rs` sends in response, feeding it through `NALUnitParser` into
-/// `VideoDecoder`.
+/// Receives one display's video stream: listens on `port` for the raw
+/// H.264/UDP stream `encode.rs` sends, feeding it through `NALUnitParser`
+/// into `VideoDecoder`.
+///
+/// This class only receives — sending the initial
+/// `PSYBEACON_START_STREAM_V1:<basePort>:<count>` request and negotiating
+/// which port belongs to which display is `DisplayNegotiator`'s job (module
+/// 4's multi-display orchestration needs one negotiation covering every
+/// display, followed by N independent receivers, not N independent
+/// requests).
 ///
 /// Raw BSD sockets, matching `NetworkDiscovery.swift`'s style — kept
 /// consistent rather than introducing Network.framework as a second
@@ -43,18 +46,12 @@ final class NetworkStreamReceiver {
         }
     }
 
-    /// `hostAddress` and `hostControlPort` identify where to send the
-    /// request — from module 1's resolved `HostRoute`, the discovery
-    /// port either way (LAN or Tailscale, the host answers the same
-    /// message identically on both). `localReceivePort` is the UDP port
-    /// on this machine the host should stream *to*.
-    func start(hostAddress: String, hostControlPort: UInt16 = 43701, localReceivePort: UInt16) throws {
+    /// `localReceivePort` is the UDP port on this machine the host streams
+    /// *to* — for a multi-display session, this is one specific display's
+    /// `streamPort` from `DisplayNegotiator`'s manifest, not a value this
+    /// class picks itself.
+    func start(localReceivePort: UInt16) throws {
         try startReceiving(on: localReceivePort)
-        try sendStartStreamRequest(
-            hostAddress: hostAddress,
-            hostControlPort: hostControlPort,
-            localReceivePort: localReceivePort
-        )
     }
 
     func stop() {
@@ -63,38 +60,6 @@ final class NetworkStreamReceiver {
             close(receiveSocket)
             receiveSocket = -1
         }
-    }
-
-    private func sendStartStreamRequest(
-        hostAddress: String, hostControlPort: UInt16, localReceivePort: UInt16
-    ) throws {
-        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard fd >= 0 else { throw NetworkStreamError.socketCreationFailed }
-        defer { close(fd) }
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(hostControlPort.bigEndian)
-        addr.sin_addr.s_addr = inet_addr(hostAddress)
-
-        let message = "PSYBEACON_START_STREAM_V1:\(localReceivePort)"
-        let payload = Array(message.utf8)
-
-        let sent = withUnsafePointer(to: &addr) { addrPtr -> Int in
-            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                payload.withUnsafeBufferPointer { buf in
-                    sendto(
-                        fd, buf.baseAddress, buf.count, 0, sockaddrPtr,
-                        socklen_t(MemoryLayout<sockaddr_in>.size)
-                    )
-                }
-            }
-        }
-        guard sent > 0 else { throw NetworkStreamError.sendFailed }
-        print(
-            "NetworkStreamReceiver: sent start-stream request to \(hostAddress):\(hostControlPort) "
-                + "for local port \(localReceivePort)"
-        )
     }
 
     private func startReceiving(on port: UInt16) throws {

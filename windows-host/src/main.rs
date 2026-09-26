@@ -27,21 +27,57 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
+
 const DISCOVERY_PORT: u16 = 43701;
 const DISCOVERY_REQUEST: &str = "PSYBEACON_DISCOVER_V1";
 const DISCOVERY_REPLY_PREFIX: &str = "PSYBEACON_HOST_V1:";
 /// Sent by a client, over the same discovery socket, after it's resolved a
-/// `HostRoute` and wants the actual video stream: `PSYBEACON_START_STREAM_V1:<port>`,
-/// where `<port>` is the UDP port on the *client* to stream to. The client's
-/// address comes from the packet's source, same non-spoofable pattern as
-/// discovery itself — the message never needs to carry an IP.
+/// `HostRoute` and wants the actual video stream:
+/// `PSYBEACON_START_STREAM_V1:<basePort>:<count>`, where `<basePort>` is the
+/// first UDP port on the *client* to stream to (display `i` streams to
+/// `basePort + i`) and `<count>` is how many virtual displays to add. The
+/// client's address comes from the packet's source, same non-spoofable
+/// pattern as discovery itself — the message never needs to carry an IP.
+/// `:<count>` is optional and defaults to 1, for a plain single-display
+/// request.
 const START_STREAM_PREFIX: &str = "PSYBEACON_START_STREAM_V1:";
+/// Sent back to the client, over the discovery socket, once every requested
+/// display has actually been added and its real bounds are known (a JSON
+/// array of `DisplayInfo`) — *before* any frames start flowing, so the
+/// client can build its N windows first. Bounds can't be predicted ahead of
+/// time (the driver, not the client, decides where each display lands on
+/// the virtual desktop), so this reply exists instead of the client just
+/// guessing from the custom-resolution preset it can't see either.
+const STREAM_INFO_PREFIX: &str = "PSYBEACON_STREAM_INFO_V1:";
+/// v1 sanity cap — each display needs its own settle delay (~2s) added
+/// sequentially before streaming can begin, so this bounds worst-case
+/// negotiation latency as much as it bounds resource usage.
+const MAX_DISPLAY_COUNT: u16 = 4;
 const STREAM_FPS: u32 = 30;
 /// Fixed, not negotiated: unlike the video port (client-specified, since
 /// the *host* connects out to it), the sidecar is a server the host runs —
-/// the client just connects to `ws://<host>:SIDECAR_PORT` once it already
-/// knows the host's address from discovery, no protocol message needed.
+/// the client just connects to `ws://<host>:<SIDECAR_PORT + display index>`
+/// once it already knows the host's address from discovery and the display's
+/// index from the stream-info manifest, no separate protocol message needed.
 const SIDECAR_PORT: u16 = 43703;
+
+/// One entry in the `STREAM_INFO_PREFIX` manifest — everything the client
+/// needs to stand up a window for this specific virtual display: which
+/// ports to use, and where this display sits on the host's virtual desktop
+/// (so a click at the client's local origin maps to this display's corner,
+/// not the whole virtual desktop's — see `sidecar.rs`'s `DisplayBounds`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayInfo {
+    index: u16,
+    stream_port: u16,
+    sidecar_port: u16,
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+}
 
 fn main() -> io::Result<()> {
     env_logger::init();
@@ -135,25 +171,41 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
                 Ok(_) => log::info!("Answered discovery request from {src}"),
                 Err(e) => log::warn!("Failed to reply to {src}: {e}"),
             }
-        } else if let Some(port_str) = message.strip_prefix(START_STREAM_PREFIX) {
-            let Ok(client_port) = port_str.parse::<u16>() else {
-                log::warn!("Start-stream request from {src} has an invalid port: {port_str:?}");
+        } else if let Some(rest) = message.strip_prefix(START_STREAM_PREFIX) {
+            let mut parts = rest.splitn(2, ':');
+            let Some(Ok(base_port)) = parts.next().map(str::parse::<u16>) else {
+                log::warn!("Start-stream request from {src} has an invalid port: {rest:?}");
                 continue;
             };
+            let display_count: u16 = match parts.next() {
+                Some(count_str) => match count_str.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        log::warn!("Start-stream request from {src} has an invalid count: {count_str:?}");
+                        continue;
+                    }
+                },
+                None => 1,
+            };
+            let display_count = display_count.clamp(1, MAX_DISPLAY_COUNT);
 
             if streaming.swap(true, Ordering::SeqCst) {
                 log::warn!(
-                    "Start-stream request from {src} ignored — a stream is already active \
-                     (v1 supports one at a time)"
+                    "Start-stream request from {src} ignored — a session is already active \
+                     (v1 supports one client at a time)"
                 );
                 continue;
             }
 
-            let client_addr = std::net::SocketAddr::new(src.ip(), client_port);
+            let Ok(reply_socket) = socket.try_clone() else {
+                log::warn!("Start-stream request from {src}: couldn't clone the socket to reply on");
+                streaming.store(false, Ordering::SeqCst);
+                continue;
+            };
             let shutdown = shutdown.clone();
             let streaming = streaming.clone();
             std::thread::spawn(move || {
-                run_stream_session(&shutdown, client_addr);
+                run_multi_stream_session(&shutdown, &reply_socket, src, base_port, display_count);
                 streaming.store(false, Ordering::SeqCst);
             });
         }
@@ -182,46 +234,129 @@ fn remove_index_and_exit(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// The real thing `stream_test_and_exit` was a standalone rehearsal for:
-/// adds a display, captures it, and NVENC-encodes it to `client_addr` over
-/// raw H.264/UDP, running until `shutdown` is set (Ctrl+C, or the process
-/// exiting) rather than for a fixed duration. Errors at any setup step are
-/// logged and this just returns — a failed stream shouldn't take the whole
-/// launcher down, since the discovery responder should keep answering
-/// other requests regardless.
-fn run_stream_session(shutdown: &AtomicBool, client_addr: std::net::SocketAddr) {
-    let target = format!("udp://{}:{}", client_addr.ip(), client_addr.port());
-    log::info!("Stream: starting for {target}");
-
-    let pre_existing_outputs =
-        capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
-            .unwrap_or_default();
+/// Adds `display_count` virtual displays (sequentially — each needs its own
+/// settle delay, and `for_new_output`'s before/after diffing assumes it's
+/// the only thing adding displays on the adapter at a time), replies to the
+/// client with the `STREAM_INFO_PREFIX` manifest once their real bounds are
+/// known, then runs one capture/encode/sidecar loop per display concurrently
+/// until `shutdown` fires. Multi-display window orchestration's host half:
+/// each display gets its own stream port (`base_port + index`) and sidecar
+/// port (`SIDECAR_PORT + index`) so the client can run N independent
+/// windows, each with its own decoder, renderer, and input channel.
+fn run_multi_stream_session(
+    shutdown: &AtomicBool,
+    reply_socket: &UdpSocket,
+    client_src: std::net::SocketAddr,
+    base_port: u16,
+    display_count: u16,
+) {
+    log::info!("Multi-stream: request from {client_src} for {display_count} display(s)");
 
     if let Err(e) = vdd::write_custom_resolutions(&[(3840, 2160, 120)]) {
         log::warn!("VDD: couldn't write the custom-resolution registry preset ({e}).");
     }
 
-    let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("Stream: couldn't start a virtual display ({e}) — aborting stream for {target}");
-            return;
-        }
-    };
-    log::info!(
-        "Stream: virtual display {} is up (driver version: {:?})",
-        vdd_session.display_index(),
-        vdd_session.driver_version()
-    );
+    let mut sessions = Vec::new();
+    for index in 0..display_count {
+        let pre_existing_outputs =
+            capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
+                .unwrap_or_default();
 
-    let mut duplicator =
-        match capture::DesktopDuplicator::for_new_output(vdd::VDD_ADAPTER_NAME, &pre_existing_outputs) {
-            Ok(d) => d,
+        let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
+            Ok(s) => s,
             Err(e) => {
-                log::warn!("Stream: couldn't open capture ({e}) — aborting stream for {target}");
-                return;
+                log::warn!(
+                    "Multi-stream: couldn't add display {index} ({e}) — stopping at {index} of {display_count}"
+                );
+                break;
             }
         };
+
+        let duplicator =
+            match capture::DesktopDuplicator::for_new_output(vdd::VDD_ADAPTER_NAME, &pre_existing_outputs) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!(
+                        "Multi-stream: couldn't open capture for display {index} ({e}) — \
+                         stopping at {index} of {display_count}"
+                    );
+                    break;
+                }
+            };
+
+        log::info!(
+            "Multi-stream: display {index} virtual display {} is up (driver version: {:?})",
+            vdd_session.display_index(),
+            vdd_session.driver_version()
+        );
+
+        let bounds = duplicator.bounds();
+        let info = DisplayInfo {
+            index,
+            stream_port: base_port + index,
+            sidecar_port: SIDECAR_PORT + index,
+            width: duplicator.width(),
+            height: duplicator.height(),
+            left: bounds.left,
+            top: bounds.top,
+        };
+        log::info!(
+            "Multi-stream: display {index} up: {}x{} at ({}, {}), stream_port={}, sidecar_port={}",
+            info.width, info.height, info.left, info.top, info.stream_port, info.sidecar_port
+        );
+        sessions.push((vdd_session, duplicator, info));
+    }
+
+    if sessions.is_empty() {
+        log::warn!("Multi-stream: no displays could be added for {client_src}, aborting");
+        return;
+    }
+
+    let manifest: Vec<&DisplayInfo> = sessions.iter().map(|(_, _, info)| info).collect();
+    match serde_json::to_string(&manifest) {
+        Ok(json) => {
+            let message = format!("{STREAM_INFO_PREFIX}{json}");
+            if let Err(e) = reply_socket.send_to(message.as_bytes(), client_src) {
+                log::warn!("Multi-stream: couldn't send the manifest to {client_src}: {e}");
+            }
+        }
+        Err(e) => log::warn!("Multi-stream: couldn't serialize the manifest: {e}"),
+    }
+
+    let client_ip = client_src.ip();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = sessions
+            .into_iter()
+            .map(|(vdd_session, duplicator, info)| {
+                let target = format!("udp://{client_ip}:{}", info.stream_port);
+                let sidecar_port = info.sidecar_port;
+                scope.spawn(move || {
+                    run_display_stream(shutdown, vdd_session, duplicator, target, sidecar_port);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            if handle.join().is_err() {
+                log::warn!("Multi-stream: a display worker thread panicked");
+            }
+        }
+    });
+
+    log::info!("Multi-stream: session for {client_src} ended");
+}
+
+/// One display's capture → encode → network loop, plus its own sidecar
+/// input server, running until `shutdown` fires. Split out of the old
+/// single-display `run_stream_session` so `run_multi_stream_session` can run
+/// several of these concurrently, each on its own already-added display.
+fn run_display_stream(
+    shutdown: &AtomicBool,
+    vdd_session: vdd::VddSession,
+    mut duplicator: capture::DesktopDuplicator,
+    target: String,
+    sidecar_port: u16,
+) {
     log::info!(
         "Stream: capturing {}x{}, encoding to {target}",
         duplicator.width(),
@@ -242,18 +377,17 @@ fn run_stream_session(shutdown: &AtomicBool, client_addr: std::net::SocketAddr) 
     };
 
     // Tied to this session specifically, not the global `shutdown` — the
-    // sidecar's TCP listener has to actually release SIDECAR_PORT before
-    // this function returns, or the *next* stream session (once the
-    // "streaming" guard in run_discovery_responder resets) fails to bind
-    // it. Set below whenever the encode loop exits, for any reason,
+    // sidecar's TCP listener has to actually release `sidecar_port` before
+    // this function returns, or a later session on the same port fails to
+    // bind it. Set below whenever the encode loop exits, for any reason,
     // including global shutdown, which is what makes that true.
     let sidecar_shutdown = Arc::new(AtomicBool::new(false));
     let sidecar_thread = {
         let bounds = duplicator.bounds();
         let sidecar_shutdown = sidecar_shutdown.clone();
         std::thread::spawn(move || {
-            if let Err(e) = sidecar::run_sidecar_server(SIDECAR_PORT, bounds, &sidecar_shutdown) {
-                log::warn!("Sidecar: server failed: {e}");
+            if let Err(e) = sidecar::run_sidecar_server(sidecar_port, bounds, &sidecar_shutdown) {
+                log::warn!("Sidecar: server failed on port {sidecar_port}: {e}");
             }
         })
     };
