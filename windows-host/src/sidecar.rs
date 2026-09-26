@@ -48,6 +48,7 @@ enum InputEvent {
     MouseDown { button: MouseButton },
     MouseUp { button: MouseButton },
     Scroll { delta_x: f64, delta_y: f64 },
+    Zoom { delta: f64 },
     KeyDown { key_code: u16 },
     KeyUp { key_code: u16 },
 }
@@ -142,6 +143,14 @@ fn inject(event: InputEvent, bounds: DisplayBounds) {
         InputEvent::MouseDown { button } => send_mouse_button(button, true),
         InputEvent::MouseUp { button } => send_mouse_button(button, false),
         InputEvent::Scroll { delta_x, delta_y } => send_scroll(delta_x, delta_y),
+        InputEvent::Zoom { delta } => {
+            // Windows apps commonly expose pinch-to-zoom through Ctrl+wheel.
+            // NSEvent magnification is a fraction (for example, 0.1), while
+            // SendInput's wheel unit is 120 per detent.
+            send_key(0x11, false); // VK_CONTROL down
+            send_scroll(0.0, delta * 10.0);
+            send_key(0x11, true); // VK_CONTROL up
+        }
         InputEvent::KeyDown { key_code } => send_key(key_code, false),
         InputEvent::KeyUp { key_code } => send_key(key_code, true),
     }

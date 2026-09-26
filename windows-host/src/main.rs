@@ -54,7 +54,7 @@ const STREAM_INFO_PREFIX: &str = "PSYBEACON_STREAM_INFO_V1:";
 /// sequentially before streaming can begin, so this bounds worst-case
 /// negotiation latency as much as it bounds resource usage.
 const MAX_DISPLAY_COUNT: u16 = 4;
-const STREAM_FPS: u32 = 30;
+const STREAM_FPS: u32 = 60;
 /// Fixed, not negotiated: unlike the video port (client-specified, since
 /// the *host* connects out to it), the sidecar is a server the host runs —
 /// the client just connects to `ws://<host>:<SIDECAR_PORT + display index>`

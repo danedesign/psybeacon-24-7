@@ -83,7 +83,18 @@ final class InputCaptureView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        sidecar?.scroll(deltaX: Double(event.scrollingDeltaX), deltaY: Double(event.scrollingDeltaY))
+        // Precise trackpad deltas are points; a traditional wheel reports
+        // detents. Convert points to a smaller smooth wheel increment so a
+        // single trackpad event does not become several full wheel notches.
+        let scale = event.hasPreciseScrollingDeltas ? 0.1 : 1.0
+        sidecar?.scroll(
+            deltaX: Double(event.scrollingDeltaX) * scale,
+            deltaY: Double(event.scrollingDeltaY) * scale
+        )
+    }
+
+    override func magnify(with event: NSEvent) {
+        sidecar?.zoom(delta: Double(event.magnification))
     }
 
     override func keyDown(with event: NSEvent) {

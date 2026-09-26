@@ -96,10 +96,6 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         commandBuffer.present(drawable)
         commandBuffer.commit()
 
-        // Stale CVMetalTextureCache entries pin GPU memory until flushed;
-        // harmless to skip for a short test, but matters once this runs
-        // continuously for a real streaming session.
-        CVMetalTextureCacheFlush(textureCache, 0)
     }
 
     private static func makePipelineState(device: MTLDevice) throws -> MTLRenderPipelineState {

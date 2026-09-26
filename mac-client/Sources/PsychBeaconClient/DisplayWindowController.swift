@@ -11,6 +11,7 @@ import MetalKit
 /// the exact per-component wiring `AppDelegate` used for the single-display
 /// case (that path compiled and ran correctly on the first real attempt),
 /// just parameterized per `DisplayInfo` instead of hardcoded.
+@MainActor
 final class DisplayWindowController {
     let info: DisplayInfo
 
@@ -30,6 +31,8 @@ final class DisplayWindowController {
         )
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.preferredFramesPerSecond = 60
+        mtkView.isPaused = true
+        mtkView.enableSetNeedsDisplay = true
 
         renderer = try MetalRenderer(device: device)
         mtkView.delegate = renderer

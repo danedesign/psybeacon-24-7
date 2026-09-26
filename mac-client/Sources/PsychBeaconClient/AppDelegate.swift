@@ -82,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mtkView = MTKView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720), device: device)
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.preferredFramesPerSecond = 60
+        mtkView.isPaused = true
+        mtkView.enableSetNeedsDisplay = true
 
         do {
             renderer = try MetalRenderer(device: device)
@@ -116,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let displayCount = ProcessInfo.processInfo.environment["PSYBEACON_DISPLAY_COUNT"]
             .flatMap(Int.init) ?? 1
 
-        Task {
+        Task { @MainActor in
             do {
                 let route = try await NetworkDiscovery().resolveHostRoute()
                 let hostAddress: String

@@ -44,8 +44,7 @@ struct NetworkDiscovery {
     var magicRequest = "PSYBEACON_DISCOVER_V1"
     var magicReplyPrefix = "PSYBEACON_HOST_V1:"
 
-    /// Which Tailscale peer counts as "the" host, when LAN discovery finds
-    /// nothing and this falls back to the mesh — a substring matched
+    /// Which Tailscale peer counts as "the" host — a substring matched
     /// case-insensitively against each peer's Tailscale `HostName`.
     /// Defaults to "psybeacon", which only ever matches a peer actually
     /// named that; override via `PSYBEACON_TARGET_HOST` for a real tailnet,
@@ -57,10 +56,16 @@ struct NetworkDiscovery {
     var tailscaleTargetHostnameSubstring: String =
         ProcessInfo.processInfo.environment["PSYBEACON_TARGET_HOST"] ?? "psybeacon"
 
-    /// Call once at client startup. Throws if the host can't be found by
-    /// either path; the caller should surface that (retry, or prompt for a
-    /// manual host address) rather than silently hanging.
+    /// Call once at client startup. An explicitly configured target prefers
+    /// Tailscale directly; otherwise LAN discovery remains the fast path.
+    /// Throws if the host can't be found by either path; the caller should
+    /// surface that (retry, or prompt for a manual host address) rather than
+    /// silently hanging.
     func resolveHostRoute() async throws -> HostRoute {
+        if let target = ProcessInfo.processInfo.environment["PSYBEACON_TARGET_HOST"],
+           !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return try await tailscaleHostRoute()
+        }
         if let lan = try? await broadcastForHost() {
             return lan
         }
@@ -138,7 +143,7 @@ struct NetworkDiscovery {
         return .lan(host: String(cString: addrBuf), port: discoveryPort)
     }
 
-    // MARK: - Tailscale fallback
+    // MARK: - Tailscale route
 
     private func tailscaleHostRoute() async throws -> HostRoute {
         let candidates = [

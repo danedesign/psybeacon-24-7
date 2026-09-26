@@ -16,6 +16,9 @@ import Foundation
 final class InputSidecar {
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
+    private let mouseMoveLock = NSLock()
+    private var pendingMouseMove: [String: Any]?
+    private var mouseMoveScheduled = false
 
     func connect(hostAddress: String, port: UInt16 = 43703) {
         guard let url = URL(string: "ws://\(hostAddress):\(port)") else {
@@ -35,6 +38,10 @@ final class InputSidecar {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session = nil
+        mouseMoveLock.lock()
+        pendingMouseMove = nil
+        mouseMoveScheduled = false
+        mouseMoveLock.unlock()
     }
 
     /// The host never sends anything back — this only exists to notice
@@ -62,15 +69,44 @@ final class InputSidecar {
         }
     }
 
+    private func flushPendingMouseMove() {
+        mouseMoveLock.lock()
+        let payload = pendingMouseMove
+        pendingMouseMove = nil
+        mouseMoveScheduled = false
+        mouseMoveLock.unlock()
+        if let payload { send(payload) }
+    }
+
     /// `x`/`y` normalized to `[0, 1]` relative to the video frame, not
     /// window pixels — the host maps these onto its own display's actual
     /// bounds (which may not be at position (0, 0), and is a different
     /// resolution than whatever size the window happens to be).
     func mouseMove(x: Double, y: Double) {
-        send(["type": "mouseMove", "x": x, "y": y])
+        mouseMoveLock.lock()
+        pendingMouseMove = ["type": "mouseMove", "x": x, "y": y]
+        guard !mouseMoveScheduled else {
+            mouseMoveLock.unlock()
+            return
+        }
+        mouseMoveScheduled = true
+        mouseMoveLock.unlock()
+
+        // Coalesce high-rate mouse events to the newest position at 60 Hz.
+        // This avoids building a queue of stale cursor positions during drags.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 60.0)) { [weak self] in
+            guard let self else { return }
+            self.mouseMoveLock.lock()
+            let payload = self.pendingMouseMove
+            self.pendingMouseMove = nil
+            self.mouseMoveScheduled = false
+            self.mouseMoveLock.unlock()
+            if let payload { self.send(payload) }
+        }
     }
 
     func mouseDown(button: String) {
+        flushPendingMouseMove()
         send(["type": "mouseDown", "button": button])
     }
 
@@ -80,6 +116,10 @@ final class InputSidecar {
 
     func scroll(deltaX: Double, deltaY: Double) {
         send(["type": "scroll", "deltaX": deltaX, "deltaY": deltaY])
+    }
+
+    func zoom(delta: Double) {
+        send(["type": "zoom", "delta": delta])
     }
 
     /// `keyCode` is a Windows virtual-key code, already translated from
