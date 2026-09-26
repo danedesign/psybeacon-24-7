@@ -12,7 +12,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Security::{
     AdjustTokenPrivileges, DuplicateTokenEx, LookupPrivilegeValueW, SecurityImpersonation,
     SetTokenInformation, TokenPrimary, TokenSessionId, LUID_AND_ATTRIBUTES,
@@ -268,10 +270,10 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
     }
     .map_err(|error| stage_error("opening the service process token", windows_error(error)))?;
     let token = OwnedHandle(token);
-    for name in [
-        SE_TCB_NAME,
-        SE_ASSIGNPRIMARYTOKEN_NAME,
-        SE_INCREASE_QUOTA_NAME,
+    for (name, display_name) in [
+        (SE_TCB_NAME, "SeTcbPrivilege"),
+        (SE_ASSIGNPRIMARYTOKEN_NAME, "SeAssignPrimaryTokenPrivilege"),
+        (SE_INCREASE_QUOTA_NAME, "SeIncreaseQuotaPrivilege"),
     ] {
         let mut luid = windows::Win32::Foundation::LUID::default();
         unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid) }.map_err(|error| {
@@ -291,6 +293,13 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
             .map_err(|error| {
                 stage_error("enabling a required token privilege", windows_error(error))
             })?;
+        let last_error = unsafe { GetLastError() };
+        if last_error == ERROR_NOT_ALL_ASSIGNED {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("the LocalSystem service token does not contain {display_name}"),
+            ));
+        }
     }
     Ok(token)
 }
