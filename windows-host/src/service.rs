@@ -172,7 +172,8 @@ impl DesktopWorker {
             )
         })?;
 
-        let process_token = open_system_process_token()?;
+        let process_token = open_system_process_token()
+            .map_err(|error| stage_error("opening/enabling the LocalSystem token", error))?;
         let access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID;
         let mut primary_token = HANDLE::default();
         unsafe {
@@ -185,7 +186,12 @@ impl DesktopWorker {
                 &mut primary_token,
             )
         }
-        .map_err(windows_error)?;
+        .map_err(|error| {
+            stage_error(
+                "duplicating the LocalSystem primary token",
+                windows_error(error),
+            )
+        })?;
         let primary_token = OwnedHandle(primary_token);
 
         unsafe {
@@ -196,7 +202,12 @@ impl DesktopWorker {
                 std::mem::size_of::<u32>() as u32,
             )
         }
-        .map_err(windows_error)?;
+        .map_err(|error| {
+            stage_error(
+                "assigning the console session to the worker token",
+                windows_error(error),
+            )
+        })?;
 
         let mut command_line = OsString::from("\"");
         command_line.push(&executable);
@@ -226,7 +237,9 @@ impl DesktopWorker {
                 &mut process_info,
             )
         }
-        .map_err(windows_error)?;
+        .map_err(|error| {
+            stage_error("creating the desktop worker process", windows_error(error))
+        })?;
 
         let _thread = OwnedHandle(process_info.hThread);
         Ok(Self {
@@ -253,7 +266,7 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
             &mut token,
         )
     }
-    .map_err(windows_error)?;
+    .map_err(|error| stage_error("opening the service process token", windows_error(error)))?;
     let token = OwnedHandle(token);
     for name in [
         SE_TCB_NAME,
@@ -261,7 +274,12 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
         SE_INCREASE_QUOTA_NAME,
     ] {
         let mut luid = windows::Win32::Foundation::LUID::default();
-        unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid) }.map_err(windows_error)?;
+        unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid) }.map_err(|error| {
+            stage_error(
+                "looking up a required token privilege",
+                windows_error(error),
+            )
+        })?;
         let privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES {
@@ -270,7 +288,9 @@ fn open_system_process_token() -> io::Result<OwnedHandle> {
             }],
         };
         unsafe { AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None) }
-            .map_err(windows_error)?;
+            .map_err(|error| {
+                stage_error("enabling a required token privilege", windows_error(error))
+            })?;
     }
     Ok(token)
 }
@@ -305,6 +325,10 @@ fn stop_worker(worker: DesktopWorker) {
 
 fn windows_error(error: windows::core::Error) -> io::Error {
     io::Error::other(error.to_string())
+}
+
+fn stage_error(stage: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{stage}: {error}"))
 }
 
 struct OwnedHandle(HANDLE);
