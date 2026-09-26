@@ -21,8 +21,8 @@ received H.264, and connected the input sidecar. The user has not yet confirmed
 whether the physical display remains stable during streaming.
 
 Latest changes are in commit `8d6ffe9` (`Add text clipboard sync over
-sidecar`). Rust compilation passes; Swift compilation and live clipboard
-verification remain.
+sidecar`). Windows and Mac builds pass. Text clipboard sync was verified in
+both directions over the live Tailscale connection.
 
 ## Verified
 
@@ -32,6 +32,9 @@ verification remain.
   receives H.264, decodes it with VideoToolbox, and renders it with Metal.
 - Basic mouse and keyboard input reaches the Windows host through the WebSocket
   sidecar.
+- Plain-text clipboard changes sync in both directions through the sidecar on
+  display 0; tested live over Tailscale. Test strings were removed and the
+  original plain-text clipboard values restored afterward.
 - Mac `swift build` succeeds after the latest client changes.
 - Windows `cargo check` succeeds after the latest host changes.
 - The user restarted the updated Windows host successfully; it reported
@@ -60,10 +63,7 @@ verification remain.
    Windows application.
 5. **Multi-display:** code supports multiple displays, but only one display has
    been exercised in the user's live setup.
-6. **Clipboard sync:** text-only bidirectional sync is implemented over the
-   existing sidecar, limited to display 0 and 1 MiB. Needs live Mac/Windows
-   verification.
-7. **Video transport resilience:** raw H.264 over UDP has no sequence numbers
+6. **Video transport resilience:** raw H.264 over UDP has no sequence numbers
    or retransmission; packet loss can damage decoding until reconnect.
 
 ## Current connection note
