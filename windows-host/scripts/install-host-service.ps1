@@ -32,6 +32,48 @@ cargo build --release --manifest-path (Join-Path $hostDir 'Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw 'The release build failed.' }
 
 $releaseExe = Join-Path $hostDir 'target\release\psybeacon-host.exe'
+
+# Stop and remove the old service before replacing its executable. Windows
+# keeps the service image locked for the lifetime of the service process.
+$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($existingService) {
+    if ($existingService.Status -ne 'Stopped') {
+        Write-Host 'Stopping the existing PsychBeacon service before updating its executable...'
+        Stop-Service -Name $serviceName
+        (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(45))
+    }
+    sc.exe delete $serviceName | Out-Null
+    Start-Sleep -Seconds 2
+}
+
+# Stop any older interactive launch cleanly before copying the new binary.
+$listener = Get-NetUDPEndpoint -LocalPort 43701 -ErrorAction SilentlyContinue
+if ($listener) {
+    Write-Host 'Stopping the currently running host cleanly before service installation...'
+    & $releaseExe --stop
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The current listener did not acknowledge shutdown. Stop its PowerShell host with Ctrl+C, then run this installer again.'
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $listener = Get-NetUDPEndpoint -LocalPort 43701 -ErrorAction SilentlyContinue
+    } while ($listener -and (Get-Date) -lt $deadline)
+    if ($listener) { throw 'The listener has not released UDP 43701; check the host log before continuing.' }
+}
+
+# Remove the previous logon-task setup if it was installed.
+$oldTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($oldTask) {
+    if ($oldTask.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+}
+
+& $releaseExe --preflight
+if ($LASTEXITCODE -ne 0) {
+    throw 'Host preflight failed. Resolve the reported driver, FFmpeg, or port issue before installing the service.'
+}
+
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $installedFfmpeg -Force | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination $installedExe -Force
@@ -60,44 +102,6 @@ foreach ($entry in @(
 Set-Acl -LiteralPath $configDir -AclObject $configAcl
 $env:PSYBEACON_FFMPEG_DIR = $installedFfmpeg
 $env:PSYBEACON_LOG_FILE = Join-Path $logDir 'host.log'
-
-# Stop any older interactive launch cleanly before registering the service.
-$listener = Get-NetUDPEndpoint -LocalPort 43701 -ErrorAction SilentlyContinue
-if ($listener) {
-    Write-Host 'Stopping the currently running host cleanly before service installation...'
-    & $installedExe --stop
-    if ($LASTEXITCODE -ne 0) {
-        throw 'The current listener did not acknowledge shutdown. Stop its PowerShell host with Ctrl+C, then run this installer again.'
-    }
-    $deadline = (Get-Date).AddSeconds(30)
-    do {
-        Start-Sleep -Milliseconds 500
-        $listener = Get-NetUDPEndpoint -LocalPort 43701 -ErrorAction SilentlyContinue
-    } while ($listener -and (Get-Date) -lt $deadline)
-    if ($listener) { throw 'The listener has not released UDP 43701; check the host log before continuing.' }
-}
-
-# Remove the previous logon-task setup if it was installed.
-$oldTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($oldTask) {
-    if ($oldTask.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-}
-
-& $installedExe --preflight
-if ($LASTEXITCODE -ne 0) {
-    throw 'Host preflight failed. Resolve the reported driver, FFmpeg, or port issue before installing the service.'
-}
-
-$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($existingService) {
-    if ($existingService.Status -ne 'Stopped') {
-        Stop-Service -Name $serviceName
-        (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(45))
-    }
-    sc.exe delete $serviceName | Out-Null
-    Start-Sleep -Seconds 2
-}
 
 Get-NetFirewallRule -DisplayName $firewallUdp, $firewallTcp -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName $firewallUdp -Direction Inbound -Action Allow -Program $installedExe -Protocol UDP -LocalPort 43701 -RemoteAddress $remoteTailscale -Profile Any | Out-Null
