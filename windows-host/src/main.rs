@@ -18,6 +18,7 @@
 
 mod capture;
 mod encode;
+mod sidecar;
 mod vdd;
 
 use std::io;
@@ -36,6 +37,11 @@ const DISCOVERY_REPLY_PREFIX: &str = "PSYBEACON_HOST_V1:";
 /// discovery itself — the message never needs to carry an IP.
 const START_STREAM_PREFIX: &str = "PSYBEACON_START_STREAM_V1:";
 const STREAM_FPS: u32 = 30;
+/// Fixed, not negotiated: unlike the video port (client-specified, since
+/// the *host* connects out to it), the sidecar is a server the host runs —
+/// the client just connects to `ws://<host>:SIDECAR_PORT` once it already
+/// knows the host's address from discovery, no protocol message needed.
+const SIDECAR_PORT: u16 = 43703;
 
 fn main() -> io::Result<()> {
     env_logger::init();
@@ -235,6 +241,23 @@ fn run_stream_session(shutdown: &AtomicBool, client_addr: std::net::SocketAddr) 
         }
     };
 
+    // Tied to this session specifically, not the global `shutdown` — the
+    // sidecar's TCP listener has to actually release SIDECAR_PORT before
+    // this function returns, or the *next* stream session (once the
+    // "streaming" guard in run_discovery_responder resets) fails to bind
+    // it. Set below whenever the encode loop exits, for any reason,
+    // including global shutdown, which is what makes that true.
+    let sidecar_shutdown = Arc::new(AtomicBool::new(false));
+    let sidecar_thread = {
+        let bounds = duplicator.bounds();
+        let sidecar_shutdown = sidecar_shutdown.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = sidecar::run_sidecar_server(SIDECAR_PORT, bounds, &sidecar_shutdown) {
+                log::warn!("Sidecar: server failed: {e}");
+            }
+        })
+    };
+
     let frame_interval = Duration::from_millis(1000 / STREAM_FPS as u64);
     while !shutdown.load(Ordering::Relaxed) {
         match duplicator.capture_next_frame(frame_interval) {
@@ -252,6 +275,12 @@ fn run_stream_session(shutdown: &AtomicBool, client_addr: std::net::SocketAddr) 
     if let Err(e) = encoder.finish() {
         log::warn!("Stream: encoder didn't shut down cleanly: {e}");
     }
+
+    sidecar_shutdown.store(true, Ordering::SeqCst);
+    if sidecar_thread.join().is_err() {
+        log::warn!("Sidecar: server thread panicked");
+    }
+
     drop(vdd_session); // explicit: removes the display before this thread ends
     log::info!("Stream: stopped for {target}");
 }

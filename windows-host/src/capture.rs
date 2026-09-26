@@ -126,6 +126,8 @@ pub struct DesktopDuplicator {
     /// ACCESS_LOST recovery, not used for opening (that's done by COM
     /// object, not by re-looking-up this name).
     device_name: String,
+    left: i32,
+    top: i32,
     width: u32,
     height: u32,
 }
@@ -257,9 +259,11 @@ impl DesktopDuplicator {
         let desc = output
             .GetDesc()
             .map_err(|e| io::Error::from_raw_os_error(e.code().0))?;
-        let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) as u32;
-        let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) as u32;
-        log::info!("Capture: duplicating output at {width}x{height}");
+        let left = desc.DesktopCoordinates.left;
+        let top = desc.DesktopCoordinates.top;
+        let width = (desc.DesktopCoordinates.right - left) as u32;
+        let height = (desc.DesktopCoordinates.bottom - top) as u32;
+        log::info!("Capture: duplicating output at {width}x{height}, positioned at ({left}, {top})");
 
         Ok(Self {
             device,
@@ -267,6 +271,8 @@ impl DesktopDuplicator {
             output1,
             duplication,
             device_name,
+            left,
+            top,
             width,
             height,
         })
@@ -312,6 +318,19 @@ impl DesktopDuplicator {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// This display's position and size on the *virtual desktop*
+    /// (absolute pixel coordinates) — what `sidecar.rs` needs to map a
+    /// client's normalized `(0,1)` click coordinates onto the right spot,
+    /// since this display isn't necessarily at position (0, 0).
+    pub fn bounds(&self) -> crate::sidecar::DisplayBounds {
+        crate::sidecar::DisplayBounds {
+            left: self.left,
+            top: self.top,
+            width: self.width as i32,
+            height: self.height as i32,
+        }
     }
 
     /// Retry delays after an ACCESS_LOST recreate — increasing, not

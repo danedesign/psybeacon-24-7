@@ -48,19 +48,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let localStreamReceivePort: UInt16 = 43702
 
     private var window: NSWindow!
-    private var mtkView: MTKView!
+    private var mtkView: InputCaptureView!
     private var renderer: MetalRenderer!
     private var decoder: VideoDecoder!
     private var streamReceiver: NetworkStreamReceiver!
+    private var inputSidecar: InputSidecar!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("No Metal-capable GPU found")
         }
 
-        mtkView = MTKView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720), device: device)
+        mtkView = InputCaptureView(frame: NSRect(x: 0, y: 0, width: 1280, height: 720), device: device)
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.preferredFramesPerSecond = 60
+
+        inputSidecar = InputSidecar()
+        mtkView.sidecar = inputSidecar
 
         do {
             renderer = try MetalRenderer(device: device)
@@ -79,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = mtkView
         window.center()
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(mtkView)
         NSApp.activate(ignoringOtherApps: true)
 
         decoder = VideoDecoder()
@@ -120,6 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     hostControlPort: hostControlPort,
                     localReceivePort: localStreamReceivePort
                 )
+
+                inputSidecar.connect(hostAddress: hostAddress)
             } catch {
                 print(
                     "Couldn't connect to a host: \(error). Pass a local .h264/.ts/.mp4 file path "
