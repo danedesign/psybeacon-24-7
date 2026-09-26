@@ -54,7 +54,7 @@ const STREAM_INFO_PREFIX: &str = "PSYBEACON_STREAM_INFO_V1:";
 /// sequentially before streaming can begin, so this bounds worst-case
 /// negotiation latency as much as it bounds resource usage.
 const MAX_DISPLAY_COUNT: u16 = 4;
-const STREAM_FPS: u32 = 60;
+const STREAM_FPS: u32 = 30;
 /// Fixed, not negotiated: unlike the video port (client-specified, since
 /// the *host* connects out to it), the sidecar is a server the host runs —
 /// the client just connects to `ws://<host>:<SIDECAR_PORT + display index>`
@@ -239,7 +239,8 @@ fn remove_index_and_exit(args: &[String]) -> io::Result<()> {
 /// the only thing adding displays on the adapter at a time), replies to the
 /// client with the `STREAM_INFO_PREFIX` manifest once their real bounds are
 /// known, then runs one capture/encode/sidecar loop per display concurrently
-/// until `shutdown` fires. Multi-display window orchestration's host half:
+/// until the client disconnects or `shutdown` fires. Multi-display window
+/// orchestration's host half:
 /// each display gets its own stream port (`base_port + index`) and sidecar
 /// port (`SIDECAR_PORT + index`) so the client can run N independent
 /// windows, each with its own decoder, renderer, and input channel.
@@ -324,14 +325,23 @@ fn run_multi_stream_session(
     }
 
     let client_ip = client_src.ip();
+    let client_disconnected = Arc::new(AtomicBool::new(false));
     std::thread::scope(|scope| {
         let handles: Vec<_> = sessions
             .into_iter()
             .map(|(vdd_session, duplicator, info)| {
                 let target = format!("udp://{client_ip}:{}", info.stream_port);
                 let sidecar_port = info.sidecar_port;
+                let client_disconnected = client_disconnected.clone();
                 scope.spawn(move || {
-                    run_display_stream(shutdown, vdd_session, duplicator, target, sidecar_port);
+                    run_display_stream(
+                        shutdown,
+                        client_disconnected,
+                        vdd_session,
+                        duplicator,
+                        target,
+                        sidecar_port,
+                    );
                 })
             })
             .collect();
@@ -347,11 +357,12 @@ fn run_multi_stream_session(
 }
 
 /// One display's capture → encode → network loop, plus its own sidecar
-/// input server, running until `shutdown` fires. Split out of the old
+/// input server, running until the client disconnects or `shutdown` fires. Split out of the old
 /// single-display `run_stream_session` so `run_multi_stream_session` can run
 /// several of these concurrently, each on its own already-added display.
 fn run_display_stream(
     shutdown: &AtomicBool,
+    client_disconnected: Arc<AtomicBool>,
     vdd_session: vdd::VddSession,
     mut duplicator: capture::DesktopDuplicator,
     target: String,
@@ -372,28 +383,33 @@ fn run_display_stream(
         Ok(e) => e,
         Err(e) => {
             log::warn!("Stream: couldn't start the encoder ({e}) — aborting stream for {target}");
+            client_disconnected.store(true, Ordering::SeqCst);
             return;
         }
     };
 
-    // Tied to this session specifically, not the global `shutdown` — the
-    // sidecar's TCP listener has to actually release `sidecar_port` before
-    // this function returns, or a later session on the same port fails to
-    // bind it. Set below whenever the encode loop exits, for any reason,
-    // including global shutdown, which is what makes that true.
+    // Tied to this stream, not the global `shutdown` — the sidecar's TCP
+    // listener has to release `sidecar_port` before a later session can bind it.
     let sidecar_shutdown = Arc::new(AtomicBool::new(false));
     let sidecar_thread = {
         let bounds = duplicator.bounds();
         let sidecar_shutdown = sidecar_shutdown.clone();
+        let client_disconnected = client_disconnected.clone();
         std::thread::spawn(move || {
-            if let Err(e) = sidecar::run_sidecar_server(sidecar_port, bounds, &sidecar_shutdown) {
+            if let Err(e) = sidecar::run_sidecar_server(
+                sidecar_port,
+                bounds,
+                &sidecar_shutdown,
+                &client_disconnected,
+            ) {
                 log::warn!("Sidecar: server failed on port {sidecar_port}: {e}");
+                client_disconnected.store(true, Ordering::SeqCst);
             }
         })
     };
 
     let frame_interval = Duration::from_millis(1000 / STREAM_FPS as u64);
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) && !client_disconnected.load(Ordering::Relaxed) {
         match duplicator.capture_next_frame(frame_interval) {
             Ok(Some(frame)) => {
                 if let Err(e) = encoder.write_frame(&frame.data) {
@@ -408,6 +424,10 @@ fn run_display_stream(
 
     if let Err(e) = encoder.finish() {
         log::warn!("Stream: encoder didn't shut down cleanly: {e}");
+    }
+
+    if client_disconnected.load(Ordering::Relaxed) {
+        log::info!("Stream: client disconnected; stopping session for {target}");
     }
 
     sidecar_shutdown.store(true, Ordering::SeqCst);
