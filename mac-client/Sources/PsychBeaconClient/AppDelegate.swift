@@ -2,20 +2,29 @@ import AVFoundation
 import Cocoa
 import MetalKit
 
-/// Module 4's window + decode + render setup, now wired to the real
-/// network path: `NetworkDiscovery` resolves the host (module 1, unchanged
-/// since it was written — this is the first time anything actually calls
-/// it), then `NetworkStreamReceiver` requests and receives the live NVENC
-/// stream module 3 already proved works end-to-end on the Windows side.
+/// Module 4's window + decode + render setup, wired to the real network
+/// path: `NetworkDiscovery` resolves the host, then `NetworkStreamReceiver`
+/// requests and receives the live NVENC stream.
 ///
-/// Untested — unlike the file-based decode/render path this replaces
-/// (verified 2026-09-25 against an ffmpeg test pattern; see that
-/// verification's notes preserved below), nothing about
-/// `NetworkStreamReceiver`/`NALUnitParser` or `NetworkDiscovery`'s actual
-/// runtime behavior has been exercised yet. Pass a file path as the first
-/// command-line argument to fall back to the old file-based test harness
-/// (`playTestFile`, kept for exactly this — regression-testing decode/render
-/// in isolation from the network) instead of the network path.
+/// **Verified working end-to-end 2026-09-26, over a real Tailscale mesh
+/// connection — not localhost, not a simulation.** Mac and Windows host on
+/// different physical subnets (confirmed: LAN broadcast discovery
+/// correctly failed, since broadcast doesn't cross subnets — that's not a
+/// bug, see `NetworkDiscovery.swift`), connected instead via Tailscale
+/// (`PSYBEACON_TARGET_HOST` env var — see that file's doc comment for why
+/// the target has to be named explicitly on a real multi-device tailnet).
+/// The full chain confirmed working: discovery → start-stream request over
+/// the Tailscale IP → host adds a display, captures, NVENC-encodes →
+/// raw H.264 over UDP across the actual WireGuard tunnel →
+/// `NALUnitParser` reassembles it → `VideoDecoder` decodes → `MetalRenderer`
+/// renders → window shows the real remote desktop. Every piece of this
+/// (`NetworkStreamReceiver`, `NALUnitParser`, the `CMSampleBuffer`
+/// construction) was written with zero compiler feedback and worked on
+/// the first real attempt.
+///
+/// Pass a file path as the first command-line argument to fall back to
+/// the file-based test harness (`playTestFile`) for regression-testing
+/// decode/render in isolation from the network.
 ///
 /// Decode/render verification notes (2026-09-25, built and ran on macOS,
 /// Swift 5.9 toolchain, this repo's macOS 13 target): decoding an ffmpeg
