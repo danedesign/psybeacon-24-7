@@ -1,6 +1,7 @@
 import AVFoundation
 import Cocoa
 import MetalKit
+import SwiftUI
 
 /// Module 4's window + decode + render setup, wired to the real network
 /// path: `NetworkDiscovery` resolves the host, `DisplayNegotiator` requests
@@ -56,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let baseStreamReceivePort: UInt16 = 43702
 
     private var displayControllers: [DisplayWindowController] = []
+    private var pickerWindow: NSWindow?
+    private var pickerModel: HostPickerModel?
 
     // Only used by the file-based test harness (`playTestFile`), which has
     // no manifest and thus no `DisplayWindowController` to own these.
@@ -70,8 +73,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setUpTestHarnessWindow()
             playTestFile(at: path)
         } else {
-            connectToHost()
+            showComputerPicker()
         }
+    }
+
+    private func showComputerPicker() {
+        let model = HostPickerModel()
+        pickerModel = model
+        let content = HostPickerView(model: model) { [weak self, weak model] computer, displayCount in
+            guard let self, let model else { return }
+            self.connectToHost(computer, displayCount: displayCount, model: model)
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "PsychBeacon"
+        window.contentView = NSHostingView(rootView: content)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        pickerWindow = window
     }
 
     private func setUpTestHarnessWindow() {
@@ -114,27 +139,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func connectToHost() {
-        let displayCount = ProcessInfo.processInfo.environment["PSYBEACON_DISPLAY_COUNT"]
-            .flatMap(Int.init) ?? 1
-
+    private func connectToHost(
+        _ computer: DiscoveredComputer,
+        displayCount: Int,
+        model: HostPickerModel
+    ) {
+        model.beginConnecting(to: computer)
         Task { @MainActor in
             do {
-                let route = try await NetworkDiscovery().resolveHostRoute()
-                let hostAddress: String
-                let hostControlPort: UInt16
-                switch route {
-                case .lan(let host, let port):
-                    print("Found host on LAN at \(host):\(port)")
-                    (hostAddress, hostControlPort) = (host, port)
-                case .tailscale(let host, let port):
-                    print("No LAN host found; routing via Tailscale mesh IP \(host):\(port)")
-                    (hostAddress, hostControlPort) = (host, port)
-                }
-
+                let hostAddress = computer.address
                 let manifest = try await DisplayNegotiator().negotiate(
                     hostAddress: hostAddress,
-                    hostControlPort: hostControlPort,
+                    hostControlPort: computer.port,
                     basePort: baseStreamReceivePort,
                     displayCount: displayCount
                 )
@@ -151,12 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     displayControllers.append(controller)
                 }
 
+                model.connectionSucceeded(to: computer, displayCount: manifest.count)
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
-                print(
-                    "Couldn't connect to a host: \(error). Pass a local .h264/.ts/.mp4 file path "
-                        + "as an argument to test decode/render without a live host instead."
-                )
+                model.connectionFailed(error)
+                print("Couldn't connect to \(computer.hostName): \(error)")
             }
         }
     }
