@@ -5,6 +5,7 @@ final class HostPickerModel: ObservableObject {
     @Published private(set) var computers: [DiscoveredComputer] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var isConnecting = false
+    @Published private(set) var isSessionActive = false
     @Published var selectedAddress: String?
     @Published var statusMessage = "Looking for Windows computers running PsychBeacon…"
 
@@ -50,7 +51,14 @@ final class HostPickerModel: ObservableObject {
 
     func connectionSucceeded(to computer: DiscoveredComputer, displayCount: Int) {
         isConnecting = false
+        isSessionActive = true
         statusMessage = "Connected to \(computer.hostName) · \(displayCount) display\(displayCount == 1 ? "" : "s")"
+    }
+
+    func sessionDisconnected() {
+        isConnecting = false
+        isSessionActive = false
+        statusMessage = "Disconnected. Choose a computer to connect again."
     }
 
     func connectionFailed(_ error: Error) {
@@ -63,6 +71,7 @@ final class HostPickerModel: ObservableObject {
 struct HostPickerView: View {
     @ObservedObject var model: HostPickerModel
     let onConnect: @MainActor (DiscoveredComputer, Int) -> Void
+    let onDisconnect: @MainActor () -> Void
     @State private var displayCount: Int = {
         let requested = ProcessInfo.processInfo.environment["PSYBEACON_DISPLAY_COUNT"]
             .flatMap(Int.init) ?? 1
@@ -86,7 +95,7 @@ struct HostPickerView: View {
                 Button(action: model.refresh) {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isRefreshing || model.isConnecting)
+                .disabled(model.isRefreshing || model.isConnecting || model.isSessionActive)
             }
 
             List(selection: $model.selectedAddress) {
@@ -151,7 +160,11 @@ struct HostPickerView: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(selectedComputer == nil || model.isConnecting)
+                .disabled(selectedComputer == nil || model.isConnecting || model.isSessionActive)
+                if model.isSessionActive {
+                    Button("Disconnect", role: .destructive, action: onDisconnect)
+                        .keyboardShortcut(.cancelAction)
+                }
             }
         }
         .padding(22)

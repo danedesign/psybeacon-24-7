@@ -31,6 +31,15 @@ scrolling still does not work.
 - The Mac client now has a computer picker that lists online Tailscale peers
   answering PsychBeacon discovery, plus a display-count selector. The Swift
   build passes; interactive GUI discovery and connection still need a live run.
+- Mac disconnect is now explicit: closing any stream window or using the
+  floating Disconnect control should close every stream receiver and sidecar,
+  return to the picker, and allow a new connection. This lifecycle change needs
+  a live reconnect check.
+- Windows can now be installed as a hidden elevated Scheduled Task at user
+  sign-in, in the interactive desktop session needed by DXGI capture. A local
+  graceful-stop command lets it end active streams and remove virtual displays.
+  Task install/start/stop has not yet been run live; it is not a Session 0
+  service and requires the user to be signed in.
 - Both requested display streams are configured for 30 fps each. Actual frame
   delivery has not been measured independently per display.
 
@@ -56,8 +65,8 @@ scrolling still does not work.
 6. **Security and product operation.** Add an explicit session/authentication
    model before exposing the host beyond the private tailnet; package the Mac
    picker as a normal app; then improve setup, configuration, host status, and
-   restart/diagnostics for routine use. The host still runs separately with
-   Administrator privileges.
+   restart/diagnostics for routine use. The Windows host still runs separately
+   with Administrator privileges through a logon task.
 
 ## Current run notes
 

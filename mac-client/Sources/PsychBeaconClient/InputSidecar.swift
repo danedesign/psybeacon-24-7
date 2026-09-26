@@ -43,11 +43,14 @@ final class InputSidecar {
     }
 
     func disconnect() {
+        let oldTask = task
+        let oldSession = session
         clipboardTimer?.cancel()
         clipboardTimer = nil
-        task?.cancel(with: .goingAway, reason: nil)
+        oldTask?.cancel(with: .goingAway, reason: nil)
         task = nil
         session = nil
+        oldSession?.invalidateAndCancel()
         mouseMoveLock.lock()
         pendingMouseMove = nil
         mouseMoveScheduled = false

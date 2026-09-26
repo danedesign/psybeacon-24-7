@@ -59,6 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var displayControllers: [DisplayWindowController] = []
     private var pickerWindow: NSWindow?
     private var pickerModel: HostPickerModel?
+    private var sessionControlPanel: SessionControlPanelController?
+    private var connectionTask: Task<Void, Never>?
+    private var isDisconnecting = false
 
     // Only used by the file-based test harness (`playTestFile`), which has
     // no manifest and thus no `DisplayWindowController` to own these.
@@ -83,10 +86,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showComputerPicker() {
         let model = HostPickerModel()
         pickerModel = model
-        let content = HostPickerView(model: model) { [weak self, weak model] computer, displayCount in
-            guard let self, let model else { return }
-            self.connectToHost(computer, displayCount: displayCount, model: model)
-        }
+        let content = HostPickerView(
+            model: model,
+            onConnect: { [weak self, weak model] computer, displayCount in
+                guard let self, let model else { return }
+                self.connectToHost(computer, displayCount: displayCount, model: model)
+            },
+            onDisconnect: { [weak self] in self?.disconnectSession() }
+        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
@@ -100,6 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         pickerWindow = window
+        sessionControlPanel = SessionControlPanelController { [weak self] in
+            self?.disconnectSession()
+        }
     }
 
     private func setUpTestHarnessWindow() {
@@ -149,7 +159,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model: HostPickerModel
     ) {
         model.beginConnecting(to: computer)
-        Task { @MainActor in
+        connectionTask?.cancel()
+        connectionTask = Task { @MainActor in
             do {
                 let hostAddress = computer.address
                 let manifest = try await DisplayNegotiator().negotiate(
@@ -158,6 +169,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     basePort: baseStreamReceivePort,
                     displayCount: displayCount
                 )
+                try Task.checkCancellation()
+                guard !manifest.isEmpty else {
+                    throw NSError(domain: "PsychBeacon", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "The host did not create any displays."
+                    ])
+                }
                 print("Negotiated \(manifest.count) display(s) with the host: \(manifest)")
 
                 guard let device = MTLCreateSystemDefaultDevice() else {
@@ -166,22 +183,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 for info in manifest {
                     let controller = try DisplayWindowController(
-                        info: info, hostAddress: hostAddress, device: device
+                        info: info,
+                        hostAddress: hostAddress,
+                        device: device,
+                        onWindowClosed: { [weak self] in self?.disconnectSession() }
                     )
                     displayControllers.append(controller)
                 }
 
                 model.connectionSucceeded(to: computer, displayCount: manifest.count)
+                sessionControlPanel?.show(hostName: computer.hostName)
                 NSApp.activate(ignoringOtherApps: true)
             } catch {
-                model.connectionFailed(error)
-                print("Couldn't connect to \(computer.hostName): \(error)")
+                if !Task.isCancelled {
+                    disconnectSession()
+                    model.connectionFailed(error)
+                    print("Couldn't connect to \(computer.hostName): \(error)")
+                }
             }
         }
     }
 
+    @MainActor
+    private func disconnectSession() {
+        guard !isDisconnecting else { return }
+        isDisconnecting = true
+        defer { isDisconnecting = false }
+
+        connectionTask?.cancel()
+        connectionTask = nil
+        let controllers = displayControllers
+        displayControllers.removeAll()
+        controllers.forEach { $0.stop() }
+        sessionControlPanel?.hide()
+        pickerModel?.sessionDisconnected()
+        pickerWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        connectionTask?.cancel()
+        displayControllers.forEach { $0.stop() }
+        displayControllers.removeAll()
+        sessionControlPanel?.hide()
     }
 
     private func playTestFile(at path: String) {

@@ -34,6 +34,8 @@ use serde::Serialize;
 const DISCOVERY_PORT: u16 = 43701;
 const DISCOVERY_REQUEST: &str = "PSYBEACON_DISCOVER_V1";
 const DISCOVERY_REPLY_PREFIX: &str = "PSYBEACON_HOST_V1:";
+const STOP_REQUEST: &str = "PSYBEACON_STOP_V1";
+const STOP_REPLY: &str = "PSYBEACON_STOPPING_V1";
 /// Sent by a client, over the same discovery socket, after it's resolved a
 /// `HostRoute` and wants the actual video stream:
 /// `PSYBEACON_START_STREAM_V1:<basePort>:<count>`, where `<basePort>` is the
@@ -94,6 +96,7 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--preflight") => return preflight_and_exit(),
+        Some("--stop") => return request_stop_and_exit(),
         Some("--remove-index") => return remove_index_and_exit(&args),
         Some("--stream-test") => return stream_test_and_exit(&args),
         Some("--network-test") => return network_test_and_exit(&args),
@@ -205,6 +208,7 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     // logged and ignored rather than queued or replacing the active one.
     let streaming = Arc::new(AtomicBool::new(false));
 
+    let mut active_session: Option<std::thread::JoinHandle<()>> = None;
     let mut buf = [0u8; 512];
     while !shutdown.load(Ordering::Relaxed) {
         let (len, src) = match socket.recv_from(&mut buf) {
@@ -221,7 +225,11 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
         let message = String::from_utf8_lossy(&buf[..len]);
         let message = message.trim();
 
-        if message == DISCOVERY_REQUEST {
+        if message == STOP_REQUEST && src.ip().is_loopback() {
+            log::info!("Local stop requested from {src}");
+            let _ = socket.send_to(STOP_REPLY.as_bytes(), src);
+            shutdown.store(true, Ordering::SeqCst);
+        } else if message == DISCOVERY_REQUEST {
             match socket.send_to(reply.as_bytes(), src) {
                 Ok(_) => log::info!("Answered discovery request from {src}"),
                 Err(e) => log::warn!("Failed to reply to {src}: {e}"),
@@ -259,14 +267,33 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
             };
             let shutdown = shutdown.clone();
             let streaming = streaming.clone();
-            std::thread::spawn(move || {
+            active_session = Some(std::thread::spawn(move || {
                 run_multi_stream_session(&shutdown, &reply_socket, src, base_port, display_count);
                 streaming.store(false, Ordering::SeqCst);
-            });
+            }));
         }
     }
 
     log::info!("Discovery responder shutting down");
+    if let Some(session) = active_session {
+        if session.join().is_err() {
+            log::warn!("Stream session thread ended unexpectedly during shutdown");
+        }
+    }
+    Ok(())
+}
+
+/// Sends a loopback-only graceful stop request to the resident host process.
+fn request_stop_and_exit() -> io::Result<()> {
+    let socket = UdpSocket::bind(("127.0.0.1", 0))?;
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    socket.send_to(STOP_REQUEST.as_bytes(), ("127.0.0.1", DISCOVERY_PORT))?;
+    let mut response = [0u8; 64];
+    let (length, _) = socket.recv_from(&mut response)?;
+    if String::from_utf8_lossy(&response[..length]).trim() != STOP_REPLY {
+        return Err(io::Error::other("unexpected reply from host listener"));
+    }
+    log::info!("Host accepted the graceful stop request");
     Ok(())
 }
 

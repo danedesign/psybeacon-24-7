@@ -2,21 +2,37 @@
 
 ## Start the Windows host
 
-Open **Administrator PowerShell** at the repository root and run:
+## One-time setup
+
+Close any currently running host started in a PowerShell window with **Ctrl+C**
+once. Then open **Administrator PowerShell** at the repository root and run:
 
 ```powershell
-& ".\windows-host\scripts\run-host-admin.ps1"
+& ".\windows-host\scripts\install-host-task.ps1"
 ```
 
-The launcher now checks elevation, Cargo, FFmpeg/NVENC availability, the
-Parsec VDD driver, and the host's UDP/TCP ports before it starts listening.
-If a check fails, it prints the specific item to fix and exits.
+This installs and starts a hidden Scheduled Task for the signed-in Windows
+user. It starts at each sign-in and runs in that user's interactive desktop
+session, which DXGI capture needs. The first run checks elevation, Cargo,
+FFmpeg/NVENC, the Parsec VDD driver, and the required ports. Logs go to
+`%LOCALAPPDATA%\PsychBeacon\logs\host.log`.
 
-Leave that window open. The startup message should say it is listening on UDP
-port `43701`.
+The host should now stay available while you use that Windows account. It is a
+scheduled task, not a Windows service; it needs the user to be signed in.
 
-Stop it with **Ctrl+C once** in that same window. This lets the host stop FFmpeg
-and clean up the virtual display. Avoid force-killing `psybeacon-host.exe`.
+To stop the listener and clean up the active display:
+
+```powershell
+& ".\windows-host\scripts\stop-host.ps1"
+```
+
+To remove the automatic startup task:
+
+```powershell
+& ".\windows-host\scripts\uninstall-host-task.ps1"
+```
+
+Avoid force-killing `psybeacon-host.exe`; use the graceful stop command.
 
 ## Start the Mac client
 
@@ -36,7 +52,8 @@ cd ~/psybeacon-24-7/mac-client
 swift build
 ```
 
-Quit the client with **⌘Q**.
+Use the floating **Disconnect** control or close any stream window to end the
+whole session and return to the computer picker. Quit the client with **⌘Q**.
 
 ## Build checks
 

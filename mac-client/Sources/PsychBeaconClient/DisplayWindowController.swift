@@ -12,8 +12,9 @@ import MetalKit
 /// case (that path compiled and ran correctly on the first real attempt),
 /// just parameterized per `DisplayInfo` instead of hardcoded.
 @MainActor
-final class DisplayWindowController {
+final class DisplayWindowController: NSObject, NSWindowDelegate {
     let info: DisplayInfo
+    var onWindowClosed: (() -> Void)?
 
     private var window: NSWindow!
     private var mtkView: InputCaptureView!
@@ -21,9 +22,17 @@ final class DisplayWindowController {
     private var decoder: VideoDecoder!
     private var streamReceiver: NetworkStreamReceiver!
     private var inputSidecar: InputSidecar!
+    private var isStopping = false
 
-    init(info: DisplayInfo, hostAddress: String, device: MTLDevice) throws {
+    init(
+        info: DisplayInfo,
+        hostAddress: String,
+        device: MTLDevice,
+        onWindowClosed: @escaping () -> Void
+    ) throws {
         self.info = info
+        self.onWindowClosed = onWindowClosed
+        super.init()
 
         mtkView = InputCaptureView(
             frame: NSRect(x: 0, y: 0, width: info.width, height: info.height),
@@ -45,6 +54,7 @@ final class DisplayWindowController {
         )
         window.title = "PsychBeacon — display \(info.index)"
         window.contentView = mtkView
+        window.delegate = self
         // Stagger each display's window rather than stacking them all on
         // top of each other at the same default position.
         window.setFrameTopLeftPoint(
@@ -81,8 +91,16 @@ final class DisplayWindowController {
     }
 
     func stop() {
+        guard !isStopping else { return }
+        isStopping = true
         streamReceiver.stop()
         inputSidecar.disconnect()
+        window.delegate = nil
         window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard !isStopping else { return }
+        onWindowClosed?()
     }
 }
