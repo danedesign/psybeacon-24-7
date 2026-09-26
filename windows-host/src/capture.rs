@@ -146,6 +146,17 @@ impl DesktopDuplicator {
         adapter_name_substring: &str,
         before: &std::collections::HashSet<String>,
     ) -> io::Result<Self> {
+        let name = Self::new_output_name(adapter_name_substring, before)?;
+        Self::for_output_name(adapter_name_substring, &name)
+    }
+
+    /// Identifies the single output added since `before` without opening a
+    /// duplication interface. Call this immediately after adding a display;
+    /// open it later, once all display topology changes are complete.
+    pub fn new_output_name(
+        adapter_name_substring: &str,
+        before: &std::collections::HashSet<String>,
+    ) -> io::Result<String> {
         let after = enumerate_matching_outputs(adapter_name_substring)?;
         let mut new_ones: Vec<_> = after
             .into_iter()
@@ -160,11 +171,7 @@ impl DesktopDuplicator {
                      the snapshot — nothing to safely open"
                 ),
             )),
-            1 => {
-                let (name, adapter, output) = new_ones.remove(0);
-                log::info!("Capture: targeting newly-added output {name}");
-                unsafe { Self::open(&adapter, &output, name) }
-            }
+            1 => Ok(new_ones.remove(0).0),
             n => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -173,6 +180,24 @@ impl DesktopDuplicator {
                 ),
             )),
         }
+    }
+
+    /// Re-enumerates the adapter and opens duplication on this exact output.
+    /// Device names are captured during the add/diff step so later topology
+    /// changes cannot cause us to guess which output belongs to a session.
+    pub fn for_output_name(adapter_name_substring: &str, name: &str) -> io::Result<Self> {
+        let outputs = enumerate_matching_outputs(adapter_name_substring)?;
+        let (_, adapter, output) = outputs
+            .into_iter()
+            .find(|(candidate, _, _)| candidate == name)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("output {name} is no longer present on the {adapter_name_substring} adapter"),
+                )
+            })?;
+        log::info!("Capture: targeting newly-added output {name}");
+        unsafe { Self::open(&adapter, &output, name.to_owned()) }
     }
 
     /// Diagnostic only — never for real capture, use [`for_new_output`] for

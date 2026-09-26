@@ -235,9 +235,8 @@ fn remove_index_and_exit(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// Adds `display_count` virtual displays (sequentially — each needs its own
-/// settle delay, and `for_new_output`'s before/after diffing assumes it's
-/// the only thing adding displays on the adapter at a time), replies to the
+/// Adds `display_count` virtual displays sequentially, then opens capture
+/// interfaces only after all topology changes are complete. Replies to the
 /// client with the `STREAM_INFO_PREFIX` manifest once their real bounds are
 /// known, then runs one capture/encode/sidecar loop per display concurrently
 /// until the client disconnects or `shutdown` fires. Multi-display window
@@ -258,7 +257,7 @@ fn run_multi_stream_session(
         log::warn!("VDD: couldn't write the custom-resolution registry preset ({e}).");
     }
 
-    let mut sessions = Vec::new();
+    let mut added_displays = Vec::new();
     for index in 0..display_count {
         let pre_existing_outputs =
             capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
@@ -274,9 +273,12 @@ fn run_multi_stream_session(
             }
         };
 
-        let duplicator =
-            match capture::DesktopDuplicator::for_new_output(vdd::VDD_ADAPTER_NAME, &pre_existing_outputs) {
-                Ok(d) => d,
+        let output_name =
+            match capture::DesktopDuplicator::new_output_name(
+                vdd::VDD_ADAPTER_NAME,
+                &pre_existing_outputs,
+            ) {
+                Ok(name) => name,
                 Err(e) => {
                     log::warn!(
                         "Multi-stream: couldn't open capture for display {index} ({e}) — \
@@ -291,6 +293,25 @@ fn run_multi_stream_session(
             vdd_session.display_index(),
             vdd_session.driver_version()
         );
+
+        added_displays.push((index, vdd_session, output_name));
+    }
+
+    let mut sessions = Vec::new();
+    for (index, vdd_session, output_name) in added_displays {
+        let duplicator = match capture::DesktopDuplicator::for_output_name(
+            vdd::VDD_ADAPTER_NAME,
+            &output_name,
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "Multi-stream: couldn't open capture for display {index} ({e}) — skipping it"
+                );
+                drop(vdd_session);
+                continue;
+            }
+        };
 
         let bounds = duplicator.bounds();
         let info = DisplayInfo {
