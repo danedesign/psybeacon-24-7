@@ -109,7 +109,36 @@ New-Service -Name $serviceName -DisplayName 'PsychBeacon Host' -Description 'Pro
 Start-Service -Name $serviceName
 (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
 
+$logPath = Join-Path $logDir 'host.log'
+$workerDeadline = (Get-Date).AddSeconds(30)
+$workerStarted = $false
+do {
+    $recentLog = @(Get-Content -LiteralPath $logPath -Tail 100 -ErrorAction SilentlyContinue)
+    $serviceStartIndex = -1
+    for ($index = $recentLog.Count - 1; $index -ge 0; $index--) {
+        if ($recentLog[$index] -match 'PsychBeacon system service started') {
+            $serviceStartIndex = $index
+            break
+        }
+    }
+    $sessionLog = @()
+    if ($serviceStartIndex -ge 0 -and $serviceStartIndex + 1 -lt $recentLog.Count) {
+        $sessionLog = $recentLog[($serviceStartIndex + 1)..($recentLog.Count - 1)]
+    }
+    if ($sessionLog -match 'Started SYSTEM desktop worker in console session') {
+        $workerStarted = $true
+        break
+    }
+    if ($sessionLog -match "Couldn't launch desktop worker in session") {
+        throw "The service is running, but its desktop worker failed to launch. Recent log: $logPath`n$($sessionLog | Select-Object -Last 12 | Out-String)"
+    }
+    Start-Sleep -Seconds 1
+} while ((Get-Date) -lt $workerDeadline)
+if (-not $workerStarted) {
+    throw "The service started, but no desktop worker became ready within 30 seconds. Check $logPath"
+}
+
 Write-Host 'PsychBeacon Host is installed as an Automatic LocalSystem service.'
 Write-Host 'It supervises a SYSTEM worker in the active console session, including the Windows sign-in/locked desktop.'
 Write-Host "Firewall access is restricted to Tailscale IPv4 peers ($remoteTailscale). Keep your tailnet ACL limited to trusted devices."
-Write-Host "Log file: $(Join-Path $logDir 'host.log')"
+Write-Host "Log file: $logPath"
