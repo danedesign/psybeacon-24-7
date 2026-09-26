@@ -67,7 +67,11 @@ final class DisplayWindowController {
 
         streamReceiver = NetworkStreamReceiver(decoder: decoder)
         try streamReceiver.start(localReceivePort: info.streamPort)
-        inputSidecar.connect(hostAddress: hostAddress, port: info.sidecarPort)
+        inputSidecar.connect(
+            hostAddress: hostAddress,
+            port: info.sidecarPort,
+            syncClipboard: info.index == 0
+        )
 
         print(
             "DisplayWindowController: display \(info.index) ready "

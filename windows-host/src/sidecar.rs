@@ -49,6 +49,7 @@ enum InputEvent {
     MouseUp { button: MouseButton },
     Scroll { delta_x: f64, delta_y: f64 },
     Zoom { delta: f64 },
+    Clipboard { text: String },
     KeyDown { key_code: u16 },
     KeyUp { key_code: u16 },
 }
@@ -80,7 +81,13 @@ pub fn run_sidecar_server(
         match listener.accept() {
             Ok((stream, addr)) => {
                 log::info!("Sidecar: connection from {addr}");
-                let connected = handle_connection(stream, bounds, shutdown, client_disconnected);
+                let connected = handle_connection(
+                    stream,
+                    bounds,
+                    port == 43703,
+                    shutdown,
+                    client_disconnected,
+                );
                 log::info!("Sidecar: connection from {addr} ended");
                 if connected {
                     client_disconnected.store(true, Ordering::SeqCst);
@@ -111,6 +118,7 @@ pub fn run_sidecar_server(
 fn handle_connection(
     stream: TcpStream,
     bounds: DisplayBounds,
+    clipboard_enabled: bool,
     shutdown: &AtomicBool,
     client_disconnected: &AtomicBool,
 ) -> bool {
@@ -129,14 +137,62 @@ fn handle_connection(
         log::warn!("Sidecar: couldn't set a read timeout, shutdown may be delayed: {e}");
     }
 
+    let clipboard_owner = if clipboard_enabled {
+        match crate::clipboard::create_owner_window() {
+            Ok(hwnd) => Some(hwnd),
+            Err(error) => {
+                log::warn!("Sidecar: couldn't create clipboard owner window: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let clipboard_enabled = clipboard_owner.is_some();
+
     // Trackpads send many small, precise deltas. Preserve them across input
     // messages and emit complete wheel detents so Windows applications that
     // only react to WHEEL_DELTA (120) still scroll reliably.
     let mut scroll_remainder_x = 0.0;
     let mut scroll_remainder_y = 0.0;
+    let mut last_clipboard_sequence = if clipboard_enabled {
+        crate::clipboard::sequence_number()
+    } else {
+        0
+    };
+    let mut last_client_clipboard: Option<String> = None;
 
     while !shutdown.load(Ordering::Relaxed) {
+        if clipboard_enabled {
+            let sequence = crate::clipboard::sequence_number();
+            if sequence != last_clipboard_sequence {
+                last_clipboard_sequence = sequence;
+                if let Some(text) = crate::clipboard::read_text(clipboard_owner.unwrap()) {
+                    if last_client_clipboard.as_deref() == Some(text.as_str()) {
+                        last_client_clipboard = None;
+                    } else if text.len() <= crate::clipboard::MAX_CLIPBOARD_BYTES {
+                        let payload = serde_json::json!({ "type": "clipboard", "text": text });
+                        match serde_json::to_string(&payload) {
+                            Ok(text) => {
+                                if let Err(error) = socket.send(Message::Text(text.into())) {
+                                    log::warn!("Sidecar: couldn't send clipboard update: {error}");
+                                    client_disconnected.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                            Err(error) => log::warn!("Sidecar: couldn't encode clipboard update: {error}"),
+                        }
+                    }
+                }
+            }
+        }
+
         match socket.read() {
+            Ok(Message::Text(text))
+                if text.len() > crate::clipboard::MAX_CLIPBOARD_BYTES * 6 + 256 =>
+            {
+                log::warn!("Sidecar: ignoring oversized input message ({} bytes)", text.len());
+            }
             Ok(Message::Text(text)) => match serde_json::from_str::<InputEvent>(&text) {
                 Ok(InputEvent::Scroll { delta_x, delta_y }) => {
                     scroll_remainder_x += delta_x;
@@ -149,6 +205,29 @@ fn handle_connection(
                         inject(InputEvent::Scroll { delta_x: whole_x, delta_y: whole_y }, bounds);
                     }
                 }
+                Ok(InputEvent::Clipboard { text }) if clipboard_enabled => {
+                    if text.len() <= crate::clipboard::MAX_CLIPBOARD_BYTES {
+                        if let Some(current) = crate::clipboard::read_text(clipboard_owner.unwrap()) {
+                            if current != text {
+                                match crate::clipboard::write_text(clipboard_owner.unwrap(), &text) {
+                                    Ok(()) => {
+                                        last_client_clipboard = Some(text);
+                                        last_clipboard_sequence = crate::clipboard::sequence_number();
+                                    }
+                                    Err(error) => log::warn!("Sidecar: couldn't update Windows clipboard: {error}"),
+                                }
+                            }
+                        } else if let Err(error) = crate::clipboard::write_text(clipboard_owner.unwrap(), &text) {
+                            log::warn!("Sidecar: couldn't update Windows clipboard: {error}");
+                        } else {
+                            last_client_clipboard = Some(text);
+                            last_clipboard_sequence = crate::clipboard::sequence_number();
+                        }
+                    } else {
+                        log::warn!("Sidecar: ignoring clipboard text larger than 1 MiB");
+                    }
+                }
+                Ok(InputEvent::Clipboard { .. }) => {}
                 Ok(event) => inject(event, bounds),
                 Err(e) => log::warn!("Sidecar: bad message, ignoring ({e}): {text}"),
             },
@@ -170,6 +249,9 @@ fn handle_connection(
             }
         }
     }
+    if let Some(hwnd) = clipboard_owner {
+        crate::clipboard::destroy_owner_window(hwnd);
+    }
     true
 }
 
@@ -186,6 +268,7 @@ fn inject(event: InputEvent, bounds: DisplayBounds) {
         InputEvent::MouseDown { button } => send_mouse_button(button, true),
         InputEvent::MouseUp { button } => send_mouse_button(button, false),
         InputEvent::Scroll { delta_x, delta_y } => send_scroll(delta_x, delta_y),
+        InputEvent::Clipboard { .. } => {}
         InputEvent::Zoom { delta } => {
             // Windows apps commonly expose pinch-to-zoom through Ctrl+wheel.
             // NSEvent magnification is a fraction (for example, 0.1), while

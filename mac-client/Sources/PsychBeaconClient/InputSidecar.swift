@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Sends keyboard/mouse input to the host's sidecar WebSocket server
@@ -19,8 +20,13 @@ final class InputSidecar {
     private let mouseMoveLock = NSLock()
     private var pendingMouseMove: [String: Any]?
     private var mouseMoveScheduled = false
+    private var clipboardTimer: DispatchSourceTimer?
+    private var lastClipboardChangeCount: Int?
+    private var clipboardSyncEnabled = false
 
-    func connect(hostAddress: String, port: UInt16 = 43703) {
+    private let maxClipboardBytes = 1_048_576
+
+    func connect(hostAddress: String, port: UInt16 = 43703, syncClipboard: Bool = true) {
         guard let url = URL(string: "ws://\(hostAddress):\(port)") else {
             print("InputSidecar: invalid URL for \(hostAddress):\(port)")
             return
@@ -29,12 +35,16 @@ final class InputSidecar {
         self.session = session
         let task = session.webSocketTask(with: url)
         self.task = task
+        clipboardSyncEnabled = syncClipboard
         task.resume()
         print("InputSidecar: connecting to ws://\(hostAddress):\(port)")
+        startClipboardMonitoring()
         receiveLoop()
     }
 
     func disconnect() {
+        clipboardTimer?.cancel()
+        clipboardTimer = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session = nil
@@ -42,15 +52,18 @@ final class InputSidecar {
         pendingMouseMove = nil
         mouseMoveScheduled = false
         mouseMoveLock.unlock()
+        lastClipboardChangeCount = nil
     }
 
-    /// The host never sends anything back — this only exists to notice
-    /// when the connection dies (a `.failure` result), since nothing else
-    /// would otherwise surface that.
+    /// Receives host clipboard updates and keeps reading so the callback
+    /// reports sidecar disconnects to the client log.
     private func receiveLoop() {
         task?.receive { [weak self] result in
             switch result {
-            case .success:
+            case .success(let message):
+                if case .string(let text) = message {
+                    self?.handleIncoming(text)
+                }
                 self?.receiveLoop()
             case .failure(let error):
                 print("InputSidecar: connection ended: \(error)")
@@ -66,6 +79,54 @@ final class InputSidecar {
             if let error {
                 print("InputSidecar: send failed: \(error)")
             }
+        }
+    }
+
+    private func startClipboardMonitoring() {
+        guard clipboardSyncEnabled else { return }
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in
+            self?.sendClipboardIfChanged()
+        }
+        timer.resume()
+        clipboardTimer = timer
+    }
+
+    private func sendClipboardIfChanged() {
+        let pasteboard = NSPasteboard.general
+        let changeCount = pasteboard.changeCount
+        guard changeCount != lastClipboardChangeCount else { return }
+        lastClipboardChangeCount = changeCount
+        guard let text = pasteboard.string(forType: .string) else { return }
+        guard text.lengthOfBytes(using: .utf8) <= maxClipboardBytes else {
+            print("InputSidecar: ignoring clipboard text larger than 1 MiB")
+            return
+        }
+        send(["type": "clipboard", "text": text])
+    }
+
+    private func handleIncoming(_ message: String) {
+        guard clipboardSyncEnabled,
+            let data = message.data(using: .utf8),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            payload["type"] as? String == "clipboard",
+            let text = payload["text"] as? String,
+            text.lengthOfBytes(using: .utf8) <= maxClipboardBytes
+        else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let pasteboard = NSPasteboard.general
+            guard pasteboard.string(forType: .string) != text else {
+                self.lastClipboardChangeCount = pasteboard.changeCount
+                return
+            }
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            self.lastClipboardChangeCount = pasteboard.changeCount
+            print("InputSidecar: received clipboard text from host")
         }
     }
 

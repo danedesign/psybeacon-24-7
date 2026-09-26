@@ -17,6 +17,7 @@
 //! machine that doesn't have the driver yet.
 
 mod capture;
+mod clipboard;
 mod encode;
 mod sidecar;
 mod vdd;
