@@ -62,7 +62,7 @@ final class HostPickerModel: ObservableObject {
 @MainActor
 struct HostPickerView: View {
     @ObservedObject var model: HostPickerModel
-    let onConnect: (DiscoveredComputer, Int) -> Void
+    let onConnect: @MainActor (DiscoveredComputer, Int) -> Void
     @State private var displayCount: Int = {
         let requested = ProcessInfo.processInfo.environment["PSYBEACON_DISPLAY_COUNT"]
             .flatMap(Int.init) ?? 1

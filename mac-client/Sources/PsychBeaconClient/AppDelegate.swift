@@ -73,10 +73,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setUpTestHarnessWindow()
             playTestFile(at: path)
         } else {
-            showComputerPicker()
+            Task { @MainActor in
+                showComputerPicker()
+            }
         }
     }
 
+    @MainActor
     private func showComputerPicker() {
         let model = HostPickerModel()
         pickerModel = model
@@ -139,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor
     private func connectToHost(
         _ computer: DiscoveredComputer,
         displayCount: Int,
