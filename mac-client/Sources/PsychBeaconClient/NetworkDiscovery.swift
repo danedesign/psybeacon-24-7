@@ -92,7 +92,7 @@ struct NetworkDiscovery {
 
         return await withTaskGroup(of: DiscoveredComputer?.self) { group in
             for peer in peers {
-                guard let address = peer.tailscaleIPs.first else { continue }
+                guard let address = peer.tailscaleIPs.first(where: { $0.contains(".") }) else { continue }
                 group.addTask {
                     await probeTailscalePeer(hostName: peer.hostName, address: address)
                 }

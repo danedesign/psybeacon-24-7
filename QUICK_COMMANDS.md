@@ -27,8 +27,9 @@ cd ~/psybeacon-24-7/mac-client
 PSYBEACON_TARGET_HOST=desktop-1aachgk swift run
 ```
 
-The target setting skips LAN discovery, which can find the stale host at
-`192.168.1.105`. To rebuild only:
+This opens the computer picker. The target setting preselects that Tailscale
+peer; it no longer bypasses the picker. Run `swift run` without the setting to
+choose from every responding Windows host on your tailnet. To rebuild only:
 
 ```sh
 cd ~/psybeacon-24-7/mac-client

@@ -28,6 +28,9 @@ scrolling still does not work.
 - A tracked Administrator launcher and `--preflight` command now check Cargo,
   FFmpeg/NVENC, the Parsec VDD driver, and required ports before listening;
   the new elevated launcher has not yet been run live.
+- The Mac client now has a computer picker that lists online Tailscale peers
+  answering PsychBeacon discovery, plus a display-count selector. The Swift
+  build passes; interactive GUI discovery and connection still need a live run.
 - Both requested display streams are configured for 30 fps each. Actual frame
   delivery has not been measured independently per display.
 
@@ -51,8 +54,10 @@ scrolling still does not work.
 5. **Clipboard scope.** Text sync works in both directions. Rich content such
    as images and files, plus clipboard history, remains future work.
 6. **Security and product operation.** Add an explicit session/authentication
-   model before exposing the host beyond the private tailnet; then improve
-   setup, configuration, launch/restart, and diagnostics for routine use.
+   model before exposing the host beyond the private tailnet; package the Mac
+   picker as a normal app; then improve setup, configuration, host status, and
+   restart/diagnostics for routine use. The host still runs separately with
+   Administrator privileges.
 
 ## Current run notes
 
