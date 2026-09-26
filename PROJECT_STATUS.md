@@ -2,8 +2,9 @@
 
 Last updated: 2026-09-27
 
-PsychBeacon is a macOS client for viewing and controlling a Windows desktop
-through a Parsec virtual display. This file tracks current work and priorities.
+PsychBeacon is a macOS client for viewing and controlling a Windows desktop,
+with physical-display mirroring or a headless virtual display. This file tracks
+current work and priorities.
 See [`TIMELINE.md`](TIMELINE.md) for chronological history and [`AGENTS.md`](AGENTS.md)
 for architecture details.
 
@@ -12,8 +13,11 @@ for architecture details.
 The end-to-end stream works over Tailscale. The host and Mac client support
 multiple independent displays, with each stream configured for 30 fps. The
 user reports the physical Windows display no longer blinks after reloading the
-host with the capture-recovery fix. Video still feels sluggish and trackpad
-scrolling still does not work.
+host with the capture-recovery fix. The LocalSystem service now starts its
+worker in the active console session. The user reports that clicking the Mac
+client's Disconnect control crashes the app, and the session currently shows
+the extended desktop instead of mirroring the physical display. Video still
+feels sluggish and trackpad scrolling still does not work.
 
 ## Verified
 
@@ -31,10 +35,9 @@ scrolling still does not work.
 - The Mac client now has a computer picker that lists online Tailscale peers
   answering PsychBeacon discovery, plus a display-count selector. The Swift
   build passes; interactive GUI discovery and connection still need a live run.
-- Mac disconnect is now explicit: closing any stream window or using the
-  floating Disconnect control should close every stream receiver and sidecar,
-  return to the picker, and allow a new connection. This lifecycle change needs
-  a live reconnect check.
+- Mac disconnect has a floating control and window-close handling, but the user
+  reports that clicking Disconnect crashes the client. Fix and verify cleanup,
+  return to the picker, and reconnect before routine use.
 - Windows now has an Automatic LocalSystem service supervisor. It launches a
   SYSTEM worker in the active console session, restarts it after a session
   change or unexpected exit, and keeps DXGI capture out of Session 0. The
@@ -51,28 +54,40 @@ scrolling still does not work.
 
 ## Main development priorities
 
-1. **Video performance and refresh rate.** Playback feels sluggish. Measure
+1. **Disconnect crash and session lifecycle.** The user reports that clicking
+   the floating Disconnect control quits the Mac client unexpectedly. Find and
+   fix the crash, ensure all receivers and sidecars stop, return to the picker,
+   and verify reconnect works without quitting the app.
+2. **Mirror a physical display by default.** When the host has an active
+   physical display, capture and mirror that desktop so the Mac shows the same
+   content as the host screen; do not create an extended VDD by default. Detect
+   active physical outputs and distinguish them from Parsec VDD outputs.
+3. **Headless fallback.** If no physical display is connected/active, create a
+   Parsec virtual display and stream it. Keep display selection/mode explicit
+   if the host has multiple eligible physical outputs. Preserve the selected
+   display's resolution and refresh/FPS behavior where the capture and encoder
+   support it; keep the current 30 fps target until delivery is measured.
+4. **Video performance and refresh rate.** Playback feels sluggish. Measure
    capture, GPU readback, NVENC, UDP delivery, decode, and render pacing. Fix
    the bottleneck before raising the current 30 fps target; then evaluate
    60/120 fps and two-stream load.
-2. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
+5. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
    gesture capture through the WebSocket and Windows wheel injection. Confirm
    pinch-to-zoom in a real Windows application.
-3. **Multi-display reliability.** Verify independent video and input on each
+6. **Multi-display reliability.** Verify independent video and input on each
    display, reconnect behavior, and cleanup of virtual displays after normal
-   disconnects and capture failures. Current two-display support has just been
-   exercised in the user's setup; longer stability and per-display input still
-   need confirmation.
-4. **Transport resilience.** Video is raw H.264 over UDP without packet
+   disconnects and capture failures. Longer stability and per-display input
+   still need confirmation.
+7. **Transport resilience.** Video is raw H.264 over UDP without packet
    sequencing or retransmission. Add loss detection and a recovery strategy so
    one lost packet does not leave decoding damaged until reconnect.
-5. **Clipboard scope.** Text sync works in both directions. Rich content such
+8. **Clipboard scope.** Text sync works in both directions. Rich content such
    as images and files, plus clipboard history, remains future work.
-6. **Security and product operation.** Add explicit session authentication
+9. **Security and product operation.** Add explicit session authentication
    before exposing the host beyond a restricted private tailnet; package the
    Mac picker as a normal app; then improve setup, configuration, host status,
-   and diagnostics for routine use. The Windows service is installed; reboot,
-   lock-screen, and account-switch behavior still need live verification.
+   and diagnostics for routine use. Reboot, lock-screen, and account-switch
+   behavior for the Windows service still need live verification.
 
 ## Current run notes
 

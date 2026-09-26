@@ -6,6 +6,7 @@ Built from git history plus this repo's session notes (CLAUDE.md and prior Claud
 
 | Date | Type | Title | Description |
 |---|---|---|---|
+| 2026-09-27 | Wishlist | Disconnect stability and display mirroring | User reports the Mac Disconnect control crashes the client and the session shows only the extended desktop. Priorities: fix disconnect/reconnect lifecycle; mirror an active physical Windows display by default; detect when no physical display is available and create a Parsec VDD as a headless fallback; preserve the selected display's resolution and supported frame-rate behavior. |
 | 2026-09-22 | Update | VDD driver integration verified | Registry write → device open → add-display → heartbeat → version query all confirmed working, elevated, against real driver v0.45.0.0. |
 | 2026-09-22 | Troubleshooting | VDD access-rights bug | `FILE_GENERIC_READ \| FILE_GENERIC_WRITE` looked like a valid stand-in for upstream's `GENERIC_READ \| GENERIC_WRITE` but wasn't — driver rejected the expanded form. |
 | 2026-09-22 | Troubleshooting | HRESULT vs WIN32_ERROR comparison bug | Comparing an `HRESULT`'s raw code against a `WIN32_ERROR` constant never matched, silently masking the access-rights bug's real error. |
