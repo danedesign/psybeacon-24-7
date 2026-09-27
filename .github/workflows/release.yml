@@ -1,0 +1,154 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build host
+        run: cargo +stable build --release --manifest-path windows-host/Cargo.toml
+
+      - name: Package Windows files
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $packageDir = Join-Path $env:RUNNER_TEMP 'PsychBeacon-Windows-x64'
+          $distDir = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Path $packageDir, $distDir -Force | Out-Null
+          Copy-Item 'windows-host/target/release/psybeacon-host.exe' $packageDir
+          Copy-Item 'windows-host/scripts/host-tray.ps1' $packageDir
+          Copy-Item 'HOST_PC_SETUP.md' $packageDir
+          @'
+          PsychBeacon Windows x64 preview
+
+          This package contains the host executable, tray UI script, and setup guide.
+          It is not a standalone installer. The service installer is in the full source checkout.
+          Host setup requires the FFmpeg bundle described in HOST_PC_SETUP.md and the separate
+          Parsec Virtual Display Driver; neither third-party dependency is included here.
+          '@ | Set-Content -LiteralPath (Join-Path $packageDir 'README.txt') -Encoding UTF8
+          Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath (Join-Path $distDir "PsychBeacon-Windows-x64-v$version.zip") -CompressionLevel Optimal
+          Copy-Item 'windows-host/target/release/psybeacon-host.exe' (Join-Path $distDir "psybeacon-host-windows-x64-v$version.exe")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build client
+        working-directory: mac-client
+        run: swift build --configuration release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PsychBeaconClient-${{ matrix.arch }}
+          path: mac-client/.build/release/PsychBeaconClient
+          if-no-files-found: error
+
+  package-macos:
+    name: Package universal macOS app
+    needs: build-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: PsychBeaconClient-*
+          path: builds
+          merge-multiple: false
+
+      - name: Create universal app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dist="$GITHUB_WORKSPACE/dist"
+          app="$dist/PsychBeacon.app"
+          mkdir -p "$app/Contents/MacOS"
+          lipo -create \
+            "$GITHUB_WORKSPACE/builds/PsychBeaconClient-arm64/PsychBeaconClient" \
+            "$GITHUB_WORKSPACE/builds/PsychBeaconClient-x86_64/PsychBeaconClient" \
+            -output "$app/Contents/MacOS/PsychBeaconClient"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict/></plist>
+          PLIST
+          plist="$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string PsychBeaconClient' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.psybeacon.client' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleName string PsychBeacon' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :CFBundlePackageType string APPL' "$plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $version" "$plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${GITHUB_SHA:0:12}" "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 13.0' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :NSHighResolutionCapable bool true' "$plist"
+          /usr/libexec/PlistBuddy -c 'Add :NSLocalNetworkUsageDescription string PsychBeacon discovers and connects to computers on your network.' "$plist"
+          codesign --force --deep --sign - "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$dist/PsychBeacon-macOS-universal-v$version.app.zip"
+          cp "$app/Contents/MacOS/PsychBeaconClient" "$dist/PsychBeaconClient-macOS-universal-v$version"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [build-windows, package-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-release-assets'
+          path: dist
+          merge-multiple: true
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<'NOTES'
+          ## Preview build
+
+          - **macOS:** Universal app bundle for Apple silicon and Intel Macs. It is ad-hoc signed and not notarized; Gatekeeper may require opening it with Control-click, then choosing **Open**.
+          - **Windows:** x64 host executable and tray UI script. This is not a standalone installer; setup needs the full source checkout, the FFmpeg bundle described in `HOST_PC_SETUP.md`, and the separate Parsec Virtual Display Driver.
+
+          This is an early preview. Network access is intended for a trusted Tailscale network with restrictive ACLs.
+          NOTES
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PsychBeacon $GITHUB_REF_NAME (Preview)" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --verify-tag
