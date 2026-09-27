@@ -305,7 +305,7 @@ function Connect-PsychBeaconHost($computer) {
 
         $ffplay = Join-Path $env:ProgramFiles 'PsychBeaconHost\ffmpeg\ffplay.exe'
         if (-not (Test-Path -LiteralPath $ffplay)) { throw "FFplay isn't installed at $ffplay. Re-run the PsychBeacon installer." }
-        $arguments = '-hide_banner -loglevel warning -fflags nobuffer -flags low_delay -framedrop -f h264 -window_title "PsychBeacon — {0}" "udp://0.0.0.0:{1}"' -f $computer.HostName, $display.streamPort
+        $arguments = '-hide_banner -loglevel warning -fflags nobuffer -flags low_delay -framedrop -f h264 -window_title "PsychBeacon - {0}" "udp://0.0.0.0:{1}"' -f $computer.HostName, $display.streamPort
         $script:viewerProcess = Start-Process -FilePath $ffplay -ArgumentList $arguments -PassThru -WindowStyle Hidden
         $script:connectedHost = $computer
         $script:inputHook = [PsychBeaconInputHook]::new($script:viewerProcess.Id)
@@ -337,7 +337,7 @@ function Connect-PsychBeaconHost($computer) {
             }
         })
         $script:inputTimer.Start()
-        Update-ClientStatus "Connected to $($computer.HostName) — video and input active. Close the video window or click Disconnect to end the session."
+        Update-ClientStatus "Connected to $($computer.HostName) - video and input active. Close the video window or click Disconnect to end the session."
     } catch {
         Stop-PsychBeaconClient
         [System.Windows.Forms.MessageBox]::Show("Couldn't connect to $($computer.HostName):`n`n$($_.Exception.Message)", 'PsychBeacon') | Out-Null
@@ -445,8 +445,11 @@ function Show-PsychBeaconWindow {
 $menu.add_Opening({ Update-MenuState })
 $openItem.add_Click({ Show-PsychBeaconWindow })
 $logsItem.add_Click({
-    if (Test-Path -LiteralPath $logPath) { Start-Process notepad.exe -ArgumentList @($logPath) }
-    else { [System.Windows.Forms.MessageBox]::Show("The host log doesn't exist yet: $logPath", 'PsychBeacon Host') | Out-Null }
+    if (Test-Path -LiteralPath $logPath) {
+        Start-Process notepad.exe -ArgumentList @($logPath)
+        return
+    }
+    [System.Windows.Forms.MessageBox]::Show(('Host log does not exist yet: ' + $logPath), 'PsychBeacon Host') | Out-Null
 })
 $quitItem.add_Click({ Stop-PsychBeaconClient; $icon.Visible = $false; $icon.Dispose(); $menu.Dispose(); [System.Windows.Forms.Application]::Exit() })
 $icon.add_DoubleClick({ Show-PsychBeaconWindow })
@@ -456,6 +459,7 @@ $timer.Interval = 5000
 $timer.add_Tick({ Update-MenuState })
 $timer.Start()
 Update-MenuState
+Show-PsychBeaconWindow
 [System.Windows.Forms.Application]::Run()
 $timer.Stop()
 $timer.Dispose()
