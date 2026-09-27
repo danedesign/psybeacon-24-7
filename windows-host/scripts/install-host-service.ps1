@@ -162,7 +162,7 @@ if (-not $workerStarted) {
 # sign-in; it does not own or stop the service when the tray is closed.
 $trayAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$installedTray`""
 $trayTrigger = New-ScheduledTaskTrigger -AtLogOn
-$trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -LogonType Group -RunLevel Limited
+$trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limited
 $traySettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $trayTask = New-ScheduledTask -Action $trayAction -Trigger $trayTrigger -Principal $trayPrincipal -Settings $traySettings
 Register-ScheduledTask -TaskName $trayTaskName -InputObject $trayTask -Force | Out-Null
