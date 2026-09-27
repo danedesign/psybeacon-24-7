@@ -458,86 +458,95 @@ fn run_multi_stream_session(
 ) {
     log::info!("Multi-stream: request from {client_src} for {display_count} display(s)");
 
-    if let Err(e) = vdd::write_custom_resolutions(&[(3840, 2160, 120)]) {
-        log::warn!("VDD: couldn't write the custom-resolution registry preset ({e}).");
-    }
-
-    let mut added_displays = Vec::new();
-    for index in 0..display_count {
-        let pre_existing_outputs =
-            capture::DesktopDuplicator::snapshot_matching_outputs(vdd::VDD_ADAPTER_NAME)
-                .unwrap_or_default();
-
-        let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "Multi-stream: couldn't add display {index} ({e}) — stopping at {index} of {display_count}"
-                );
-                break;
-            }
-        };
-
-        let output_name = match capture::DesktopDuplicator::new_output_name(
-            vdd::VDD_ADAPTER_NAME,
-            &pre_existing_outputs,
-        ) {
-            Ok(name) => name,
-            Err(e) => {
-                log::warn!(
-                    "Multi-stream: couldn't open capture for display {index} ({e}) — \
-                         stopping at {index} of {display_count}"
-                );
-                break;
-            }
-        };
-
-        log::info!(
-            "Multi-stream: display {index} virtual display {} is up (driver version: {:?})",
-            vdd_session.display_index(),
-            vdd_session.driver_version()
-        );
-
-        added_displays.push((index, vdd_session, output_name));
-    }
-
     let mut sessions = Vec::new();
-    for (index, vdd_session, output_name) in added_displays {
-        let duplicator = match capture::DesktopDuplicator::for_output_name(
-            vdd::VDD_ADAPTER_NAME,
-            &output_name,
-        ) {
-            Ok(d) => d,
-            Err(e) => {
+    match capture::DesktopDuplicator::for_primary_physical_output() {
+        Ok(Some(duplicator)) => {
+            if display_count > 1 {
                 log::warn!(
-                    "Multi-stream: couldn't open capture for display {index} ({e}) — skipping it"
+                    "Multi-stream: this host has a physical display; mirroring its primary output only (requested {display_count})"
                 );
-                drop(vdd_session);
-                continue;
             }
-        };
-
-        let bounds = duplicator.bounds();
-        let info = DisplayInfo {
-            index,
-            stream_port: base_port + index,
-            sidecar_port: SIDECAR_PORT + index,
-            width: duplicator.width(),
-            height: duplicator.height(),
-            left: bounds.left,
-            top: bounds.top,
-        };
-        log::info!(
-            "Multi-stream: display {index} up: {}x{} at ({}, {}), stream_port={}, sidecar_port={}",
-            info.width,
-            info.height,
-            info.left,
-            info.top,
-            info.stream_port,
-            info.sidecar_port
-        );
-        sessions.push((vdd_session, duplicator, info));
+            sessions.push((None, duplicator, 0u16));
+        }
+        Ok(None) => {
+            log::info!("Multi-stream: no active physical display; creating a Parsec-compatible virtual display");
+            if let Err(e) = vdd::write_custom_resolutions(&[(3840, 2160, 120)]) {
+                log::warn!("VDD: couldn't write the custom-resolution registry preset ({e}).");
+            }
+            for index in 0..display_count {
+                let before = capture::DesktopDuplicator::snapshot_matching_outputs(
+                    vdd::VDD_ADAPTER_NAME,
+                )
+                .unwrap_or_default();
+                let vdd_session = match vdd::VddSession::start(&vdd::VDD_ADAPTER_GUID) {
+                    Ok(session) => session,
+                    Err(e) => {
+                        log::warn!("Multi-stream: couldn't add headless display {index}: {e}");
+                        break;
+                    }
+                };
+                let output_name = match capture::DesktopDuplicator::new_output_name(
+                    vdd::VDD_ADAPTER_NAME,
+                    &before,
+                ) {
+                    Ok(name) => name,
+                    Err(e) => {
+                        log::warn!("Multi-stream: couldn't identify headless display {index}: {e}");
+                        drop(vdd_session);
+                        break;
+                    }
+                };
+                log::info!(
+                    "Multi-stream: headless virtual display {} is up (driver version: {:?})",
+                    vdd_session.display_index(),
+                    vdd_session.driver_version()
+                );
+                let duplicator = match capture::DesktopDuplicator::for_output_name(
+                    vdd::VDD_ADAPTER_NAME,
+                    &output_name,
+                ) {
+                    Ok(duplicator) => duplicator,
+                    Err(e) => {
+                        log::warn!("Multi-stream: couldn't open headless display {index}: {e}");
+                        drop(vdd_session);
+                        continue;
+                    }
+                };
+                sessions.push((Some(vdd_session), duplicator, index));
+            }
+        }
+        Err(e) => {
+            log::warn!("Multi-stream: physical display detection failed: {e}");
+            return;
+        }
     }
+
+    let sessions: Vec<_> = sessions
+        .into_iter()
+        .map(|(vdd_session, duplicator, index)| {
+            let bounds = duplicator.bounds();
+            let info = DisplayInfo {
+                index,
+                stream_port: base_port + index,
+                sidecar_port: SIDECAR_PORT + index,
+                width: duplicator.width(),
+                height: duplicator.height(),
+                left: bounds.left,
+                top: bounds.top,
+            };
+            log::info!(
+                "Multi-stream: display {} up: {}x{} at ({}, {}), stream_port={}, sidecar_port={}",
+                info.index,
+                info.width,
+                info.height,
+                info.left,
+                info.top,
+                info.stream_port,
+                info.sidecar_port
+            );
+            (vdd_session, duplicator, info)
+        })
+        .collect();
 
     if sessions.is_empty() {
         log::warn!("Multi-stream: no displays could be added for {client_src}, aborting");
@@ -595,7 +604,7 @@ fn run_multi_stream_session(
 fn run_display_stream(
     shutdown: &AtomicBool,
     client_disconnected: Arc<AtomicBool>,
-    vdd_session: vdd::VddSession,
+    vdd_session: Option<vdd::VddSession>,
     mut duplicator: capture::DesktopDuplicator,
     target: String,
     sidecar_port: u16,

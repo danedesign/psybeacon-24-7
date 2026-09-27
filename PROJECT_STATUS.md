@@ -13,13 +13,14 @@ for architecture details.
 The end-to-end stream works over Tailscale. The host and Mac client support
 multiple independent displays, with each stream configured for 30 fps. The
 user reports the physical Windows display no longer blinks after reloading the
-host with the capture-recovery fix. The LocalSystem service now starts its
-worker in the active console session. The user reports that clicking the Mac
-client's Disconnect control crashes the app, and the session currently shows
-the extended desktop instead of mirroring the physical display. Video still
-feels sluggish and trackpad scrolling still does not work.
+host with the capture-recovery fix. The LocalSystem service starts its worker
+in the active console session. Mac disconnect handling, physical-display
+mirroring, headless VDD fallback, and the Windows tray controller are
+implemented in the working tree; they still need live installation and session
+verification. Video still feels sluggish and trackpad scrolling still does
+not work.
 
-## Verified
+## Progress and verification
 
 - Host discovery through LAN/Tailscale, virtual-display creation, capture,
   NVENC encoding, Mac H.264 receive/decode, and Metal rendering.
@@ -35,9 +36,17 @@ feels sluggish and trackpad scrolling still does not work.
 - The Mac client now has a computer picker that lists online Tailscale peers
   answering PsychBeacon discovery, plus a display-count selector. The Swift
   build passes; interactive GUI discovery and connection still need a live run.
-- Mac disconnect has a floating control and window-close handling, but the user
-  reports that clicking Disconnect crashes the client. Fix and verify cleanup,
-  return to the picker, and reconnect before routine use.
+- Mac disconnect now leaves the app open and returns to the picker instead of
+  quitting on last-window close. UDP receiver shutdown waits for its receive
+  thread before closing the socket to avoid a reconnect race. Verify on macOS.
+- The host now mirrors the active primary physical output without changing
+  display topology. If no active physical output is found, it creates a Parsec
+  VDD. A physical host currently mirrors only the primary output. Verify both
+  modes live.
+- A Windows tray controller now shows service/session status, offers elevated
+  Start/Stop controls, opens the host log, and exits independently of the host
+  service. The installer registers it for each user sign-in and launches it
+  for the installing session. Verify installation and multi-account behavior.
 - Windows now has an Automatic LocalSystem service supervisor. It launches a
   SYSTEM worker in the active console session, restarts it after a session
   change or unexpected exit, and keeps DXGI capture out of Session 0. The
@@ -54,43 +63,33 @@ feels sluggish and trackpad scrolling still does not work.
 
 ## Main development priorities
 
-1. **Disconnect crash and session lifecycle.** The user reports that clicking
-   the floating Disconnect control quits the Mac client unexpectedly. Find and
-   fix the crash, ensure all receivers and sidecars stop, return to the picker,
-   and verify reconnect works without quitting the app.
-2. **Mirror a physical display by default.** When the host has an active
-   physical display, capture and mirror that desktop so the Mac shows the same
-   content as the host screen; do not create an extended VDD by default. Detect
-   active physical outputs and distinguish them from Parsec VDD outputs.
-3. **Headless fallback.** If no physical display is connected/active, create a
-   Parsec virtual display and stream it. Keep display selection/mode explicit
-   if the host has multiple eligible physical outputs. Preserve the selected
-   display's resolution and refresh/FPS behavior where the capture and encoder
-   support it; keep the current 30 fps target until delivery is measured.
-4. **Unified host/client controls.** Add a Windows system-tray app that shows
-   host/service and connection status and provides clear host controls without
-   leaving a console window open. Keep host discovery, computer selection,
-   connect, and disconnect together in the Mac client, with the same session
-   state reflected by the host tray. The LocalSystem service remains the
-   background component for boot, lock-screen, and sign-in access; tray UI runs
-   separately in the signed-in desktop.
-5. **Video performance and refresh rate.** Playback feels sluggish. Measure
+1. **Verify disconnect and reconnect.** Install the Mac client changes, confirm
+   Disconnect returns to the picker, and immediately reconnect without quitting
+   the app.
+2. **Verify display modes.** Test primary physical-display mirroring without
+   topology changes, then VDD creation when headless. A physical host currently
+   mirrors only its primary output even if multiple displays were requested.
+3. **Verify routine host controls.** Install the tray task, confirm it appears
+   in the current session and after another user's sign-in, check session
+   status and elevated service start/stop, and confirm closing the tray leaves
+   the host service running.
+4. **Video performance and refresh rate.** Playback feels sluggish. Measure
    capture, GPU readback, NVENC, UDP delivery, decode, and render pacing. Fix
    the bottleneck before raising the current 30 fps target; then evaluate
    60/120 fps and two-stream load.
-6. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
+5. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
    gesture capture through the WebSocket and Windows wheel injection. Confirm
    pinch-to-zoom in a real Windows application.
-7. **Multi-display reliability.** Verify independent video and input on each
+6. **Multi-display reliability.** Verify independent video and input on each
    display, reconnect behavior, and cleanup of virtual displays after normal
    disconnects and capture failures. Longer stability and per-display input
    still need confirmation.
-8. **Transport resilience.** Video is raw H.264 over UDP without packet
+7. **Transport resilience.** Video is raw H.264 over UDP without packet
    sequencing or retransmission. Add loss detection and a recovery strategy so
    one lost packet does not leave decoding damaged until reconnect.
-9. **Clipboard scope.** Text sync works in both directions. Rich content such
+8. **Clipboard scope.** Text sync works in both directions. Rich content such
    as images and files, plus clipboard history, remains future work.
-10. **Security and product operation.** Add explicit session authentication
+9. **Security and product operation.** Add explicit session authentication
    before exposing the host beyond a restricted private tailnet; package the
    Mac picker as a normal app; then improve setup, configuration, host status,
    and diagnostics for routine use. Reboot, lock-screen, and account-switch

@@ -67,7 +67,9 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
     DXGI_OUTDUPL_FRAME_INFO,
 };
-use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICE_PRIMARY_DEVICE,
+};
 
 /// A single captured frame, already read back into system memory as tightly
 /// packed BGRA8 (row padding from `RowPitch` stripped during readback).
@@ -198,6 +200,29 @@ impl DesktopDuplicator {
             })?;
         log::info!("Capture: targeting newly-added output {name}");
         unsafe { Self::open(&adapter, &output, name.to_owned()) }
+    }
+
+    /// Chooses the active primary physical display (preferring Windows'
+    /// primary-device flag) and opens Desktop Duplication on that exact
+    /// output. Parsec's normal connected-monitor path mirrors this output;
+    /// virtual displays are reserved for hosts with no active physical one.
+    pub fn for_primary_physical_output() -> io::Result<Option<Self>> {
+        let mut outputs: Vec<_> = enumerate_all_outputs()?
+            .into_iter()
+            .filter(|(name, adapter_name, _, _)| {
+                !adapter_name
+                    .to_lowercase()
+                    .contains(&crate::vdd::VDD_ADAPTER_NAME.to_lowercase())
+                    && is_display_active(name)
+            })
+            .collect();
+
+        outputs.sort_by_key(|(name, _, _, _)| !is_primary_display(name));
+        let Some((name, _, adapter, output)) = outputs.into_iter().next() else {
+            return Ok(None);
+        };
+        log::info!("Capture: mirroring active physical display {name}");
+        unsafe { Self::open(&adapter, &output, name).map(Some) }
     }
 
     /// Diagnostic only — never for real capture, use [`for_new_output`] for
@@ -465,6 +490,15 @@ fn enumerate_matching_outputs(
     adapter_name_substring: &str,
 ) -> io::Result<Vec<(String, IDXGIAdapter, IDXGIOutput)>> {
     let needle = adapter_name_substring.to_lowercase();
+    Ok(enumerate_all_outputs()?
+        .into_iter()
+        .filter(|(_, friendly, _, _)| friendly.to_lowercase().contains(&needle))
+        .map(|(name, _, adapter, output)| (name, adapter, output))
+        .collect())
+}
+
+fn enumerate_all_outputs(
+) -> io::Result<Vec<(String, String, IDXGIAdapter, IDXGIOutput)>> {
     let mut matches = Vec::new();
 
     unsafe {
@@ -487,10 +521,9 @@ fn enumerate_matching_outputs(
 
                 if let Ok(desc) = output.GetDesc() {
                     let device_name = decode_wide(&desc.DeviceName);
-                    let friendly = adapter_friendly_name(&device_name);
-                    log::debug!("Capture: output {device_name} = {friendly:?}");
-                    if friendly.is_some_and(|f| f.to_lowercase().contains(&needle)) {
-                        matches.push((device_name, adapter.clone(), output));
+                    if let Some(friendly) = adapter_friendly_name(&device_name) {
+                        log::debug!("Capture: output {device_name} = {friendly}");
+                        matches.push((device_name, friendly, adapter.clone(), output));
                     }
                 }
 
@@ -522,6 +555,24 @@ fn is_display_active(device_name: &str) -> bool {
         }
         if decode_wide(&dd.DeviceName).eq_ignore_ascii_case(device_name) {
             return (dd.StateFlags & DISPLAY_DEVICE_ACTIVE).0 != 0;
+        }
+        index += 1;
+    }
+}
+
+fn is_primary_display(device_name: &str) -> bool {
+    let mut index = 0u32;
+    loop {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        let ok = unsafe { EnumDisplayDevicesW(PCWSTR::null(), index, &mut dd, 0) };
+        if !ok.as_bool() {
+            return false;
+        }
+        if decode_wide(&dd.DeviceName).eq_ignore_ascii_case(device_name) {
+            return (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE).0 != 0;
         }
         index += 1;
     }

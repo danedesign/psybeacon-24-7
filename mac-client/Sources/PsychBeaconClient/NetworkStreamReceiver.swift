@@ -27,6 +27,7 @@ enum NetworkStreamError: Error {
 final class NetworkStreamReceiver {
     private let parser = NALUnitParser()
     private let decoder: VideoDecoder
+    private let stateLock = NSLock()
     private var receiveSocket: Int32 = -1
     private var receiveThread: Thread?
     private var shouldStop = false
@@ -55,16 +56,39 @@ final class NetworkStreamReceiver {
     }
 
     func stop() {
+        stateLock.lock()
         shouldStop = true
-        if receiveSocket >= 0 {
-            close(receiveSocket)
-            receiveSocket = -1
+        let fd = receiveSocket
+        let thread = receiveThread
+        receiveSocket = -1
+        receiveThread = nil
+        stateLock.unlock()
+
+        guard fd >= 0 else { return }
+        // Wake recv() first and let its owner leave the loop before closing
+        // the descriptor. Closing a socket underneath recv() can race with
+        // descriptor reuse during a fast disconnect/reconnect.
+        _ = shutdown(fd, SHUT_RDWR)
+        if let thread, thread !== Thread.current {
+            while !thread.isFinished {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
         }
+        close(fd)
     }
 
     private func startReceiving(on port: UInt16) throws {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else { throw NetworkStreamError.socketCreationFailed }
+
+        var timeout = timeval(tv_sec: 0, tv_usec: 100_000)
+        _ = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
@@ -81,8 +105,10 @@ final class NetworkStreamReceiver {
             throw NetworkStreamError.bindFailed
         }
 
+        stateLock.lock()
         receiveSocket = fd
         shouldStop = false
+        stateLock.unlock()
 
         let thread = Thread { [weak self] in
             self?.receiveLoop(fd: fd)
@@ -96,14 +122,20 @@ final class NetworkStreamReceiver {
 
     private func receiveLoop(fd: Int32) {
         var buffer = [UInt8](repeating: 0, count: 65536)
-        while !shouldStop {
+        while !isStopping {
             let received = recv(fd, &buffer, buffer.count, 0)
             guard received > 0 else {
-                if shouldStop { break }
+                if isStopping { break }
                 continue
             }
             parser.feed(Data(buffer[0..<received]))
         }
+    }
+
+    private var isStopping: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return shouldStop
     }
 }
 

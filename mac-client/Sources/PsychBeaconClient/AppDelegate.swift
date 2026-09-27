@@ -102,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "PsychBeacon"
+        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: content)
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -222,7 +223,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Closing a streamed display must disconnect back to the host picker,
+        // not tear down the whole client. Cmd+Q still terminates normally.
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            pickerWindow?.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

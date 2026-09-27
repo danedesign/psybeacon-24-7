@@ -8,6 +8,9 @@ $installedFfmpeg = Join-Path $installDir 'ffmpeg'
 $installedExe = Join-Path $installDir 'psybeacon-host.exe'
 $serviceName = 'PsychBeaconHost'
 $taskName = 'PsychBeacon Host'
+$trayTaskName = 'PsychBeacon Host Tray'
+$traySource = Join-Path $PSScriptRoot 'host-tray.ps1'
+$installedTray = Join-Path $installDir 'host-tray.ps1'
 $firewallUdp = 'PsychBeacon Host Tailscale UDP'
 $firewallTcp = 'PsychBeacon Host Tailscale Sidecar TCP'
 $remoteTailscale = '100.64.0.0/10'
@@ -22,6 +25,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $cargoDir 'cargo.exe'))) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegSource 'ffmpeg.exe'))) {
     throw "The local FFmpeg bundle was not found at $ffmpegSource. Restore windows-host/tools/ffmpeg-7.1.5 first."
+}
+if (-not (Test-Path -LiteralPath $traySource)) {
+    throw "The host tray UI script is missing: $traySource"
 }
 
 $env:Path = $cargoDir + ';' + $ffmpegSource + ';' + $env:Path
@@ -68,6 +74,14 @@ if ($oldTask) {
     if ($oldTask.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
+$oldTrayTask = Get-ScheduledTask -TaskName $trayTaskName -ErrorAction SilentlyContinue
+if ($oldTrayTask) {
+    if ($oldTrayTask.State -eq 'Running') { Stop-ScheduledTask -TaskName $trayTaskName -ErrorAction SilentlyContinue }
+    Unregister-ScheduledTask -TaskName $trayTaskName -Confirm:$false
+}
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($installedTray) } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 & $releaseExe --preflight
 if ($LASTEXITCODE -ne 0) {
@@ -77,6 +91,7 @@ if ($LASTEXITCODE -ne 0) {
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $installedFfmpeg -Force | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination $installedExe -Force
+Copy-Item -LiteralPath $traySource -Destination $installedTray -Force
 Copy-Item -Path (Join-Path $ffmpegSource '*') -Destination $installedFfmpeg -Recurse -Force
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $configDir = Join-Path $env:ProgramData 'PsychBeacon'
@@ -142,7 +157,20 @@ if (-not $workerStarted) {
     throw "The service started, but no desktop worker became ready within 30 seconds. Check $logPath"
 }
 
+# The Windows service remains the boot/lock-screen host. This per-user tray
+# process is only its interactive controller and appears for each account at
+# sign-in; it does not own or stop the service when the tray is closed.
+$trayAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$installedTray`""
+$trayTrigger = New-ScheduledTaskTrigger -AtLogOn
+$trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -LogonType Group -RunLevel Limited
+$traySettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$trayTask = New-ScheduledTask -Action $trayAction -Trigger $trayTrigger -Principal $trayPrincipal -Settings $traySettings
+Register-ScheduledTask -TaskName $trayTaskName -InputObject $trayTask -Force | Out-Null
+$trayArgs = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$installedTray`""
+Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $trayArgs -WindowStyle Hidden
+
 Write-Host 'PsychBeacon Host is installed as an Automatic LocalSystem service.'
 Write-Host 'It supervises a SYSTEM worker in the active console session, including the Windows sign-in/locked desktop.'
+Write-Host 'The PsychBeacon tray controller is running now and will start at every user sign-in.'
 Write-Host "Firewall access is restricted to Tailscale IPv4 peers ($remoteTailscale). Keep your tailnet ACL limited to trusted devices."
 Write-Host "Log file: $logPath"
