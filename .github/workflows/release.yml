@@ -88,7 +88,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           dist="$GITHUB_WORKSPACE/dist"
-          app="$dist/PsychBeacon.app"
+          app="$RUNNER_TEMP/PsychBeacon.app"
           mkdir -p "$app/Contents/MacOS"
           lipo -create \
             "$GITHUB_WORKSPACE/builds/PsychBeaconClient-arm64/PsychBeaconClient" \
