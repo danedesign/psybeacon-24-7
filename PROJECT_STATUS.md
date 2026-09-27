@@ -67,23 +67,30 @@ feels sluggish and trackpad scrolling still does not work.
    if the host has multiple eligible physical outputs. Preserve the selected
    display's resolution and refresh/FPS behavior where the capture and encoder
    support it; keep the current 30 fps target until delivery is measured.
-4. **Video performance and refresh rate.** Playback feels sluggish. Measure
+4. **Unified host/client controls.** Add a Windows system-tray app that shows
+   host/service and connection status and provides clear host controls without
+   leaving a console window open. Keep host discovery, computer selection,
+   connect, and disconnect together in the Mac client, with the same session
+   state reflected by the host tray. The LocalSystem service remains the
+   background component for boot, lock-screen, and sign-in access; tray UI runs
+   separately in the signed-in desktop.
+5. **Video performance and refresh rate.** Playback feels sluggish. Measure
    capture, GPU readback, NVENC, UDP delivery, decode, and render pacing. Fix
    the bottleneck before raising the current 30 fps target; then evaluate
    60/120 fps and two-stream load.
-5. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
+6. **Trackpad input.** Diagnose why scroll events fail end to end, from macOS
    gesture capture through the WebSocket and Windows wheel injection. Confirm
    pinch-to-zoom in a real Windows application.
-6. **Multi-display reliability.** Verify independent video and input on each
+7. **Multi-display reliability.** Verify independent video and input on each
    display, reconnect behavior, and cleanup of virtual displays after normal
    disconnects and capture failures. Longer stability and per-display input
    still need confirmation.
-7. **Transport resilience.** Video is raw H.264 over UDP without packet
+8. **Transport resilience.** Video is raw H.264 over UDP without packet
    sequencing or retransmission. Add loss detection and a recovery strategy so
    one lost packet does not leave decoding damaged until reconnect.
-8. **Clipboard scope.** Text sync works in both directions. Rich content such
+9. **Clipboard scope.** Text sync works in both directions. Rich content such
    as images and files, plus clipboard history, remains future work.
-9. **Security and product operation.** Add explicit session authentication
+10. **Security and product operation.** Add explicit session authentication
    before exposing the host beyond a restricted private tailnet; package the
    Mac picker as a normal app; then improve setup, configuration, host status,
    and diagnostics for routine use. Reboot, lock-screen, and account-switch
