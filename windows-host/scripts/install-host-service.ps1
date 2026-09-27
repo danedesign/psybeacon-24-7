@@ -11,8 +11,10 @@ $taskName = 'PsychBeacon Host'
 $trayTaskName = 'PsychBeacon Host Tray'
 $traySource = Join-Path $PSScriptRoot 'host-tray.ps1'
 $installedTray = Join-Path $installDir 'host-tray.ps1'
+$installedFfplay = Join-Path $installedFfmpeg 'ffplay.exe'
 $firewallUdp = 'PsychBeacon Host Tailscale UDP'
 $firewallTcp = 'PsychBeacon Host Tailscale Sidecar TCP'
+$clientFirewallUdp = 'PsychBeacon Client Tailscale Video UDP'
 $remoteTailscale = '100.64.0.0/10'
 $logDir = Join-Path $env:ProgramData 'PsychBeacon\logs'
 
@@ -118,9 +120,10 @@ Set-Acl -LiteralPath $configDir -AclObject $configAcl
 $env:PSYBEACON_FFMPEG_DIR = $installedFfmpeg
 $env:PSYBEACON_LOG_FILE = Join-Path $logDir 'host.log'
 
-Get-NetFirewallRule -DisplayName $firewallUdp, $firewallTcp -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Get-NetFirewallRule -DisplayName $firewallUdp, $firewallTcp, $clientFirewallUdp -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName $firewallUdp -Direction Inbound -Action Allow -Program $installedExe -Protocol UDP -LocalPort 43701 -RemoteAddress $remoteTailscale -Profile Any | Out-Null
 New-NetFirewallRule -DisplayName $firewallTcp -Direction Inbound -Action Allow -Program $installedExe -Protocol TCP -LocalPort '43703-43706' -RemoteAddress $remoteTailscale -Profile Any | Out-Null
+New-NetFirewallRule -DisplayName $clientFirewallUdp -Direction Inbound -Action Allow -Program $installedFfplay -Protocol UDP -LocalPort '43702-43705' -RemoteAddress $remoteTailscale -Profile Any | Out-Null
 
 $binaryPath = '"{0}" --service' -f $installedExe
 New-Service -Name $serviceName -DisplayName 'PsychBeacon Host' -Description 'Provides Tailscale-only access to the active Windows console desktop.' -BinaryPathName $binaryPath -StartupType Automatic | Out-Null

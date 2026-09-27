@@ -2,9 +2,9 @@
 
 Last updated: 2026-09-27
 
-PsychBeacon is a macOS client for viewing and controlling a Windows desktop,
-with physical-display mirroring or a headless virtual display. This file tracks
-current work and priorities.
+PsychBeacon has a Windows host/client UI and a macOS client for viewing and
+controlling the Windows desktop, with physical-display mirroring or a headless
+virtual display. This file tracks current work and priorities.
 See [`TIMELINE.md`](TIMELINE.md) for chronological history and [`AGENTS.md`](AGENTS.md)
 for architecture details.
 
@@ -15,10 +15,10 @@ multiple independent displays, with each stream configured for 30 fps. The
 user reports the physical Windows display no longer blinks after reloading the
 host with the capture-recovery fix. The LocalSystem service starts its worker
 in the active console session. Mac disconnect handling, physical-display
-mirroring, headless VDD fallback, and the Windows tray controller are
-implemented in the working tree; they still need live installation and session
-verification. Video still feels sluggish and trackpad scrolling still does
-not work.
+mirroring, headless VDD fallback, and a Windows host/client window with peer
+discovery, video, and input are implemented in the working tree; they still
+need live installation and session verification. Video still feels sluggish
+and trackpad scrolling still does not work.
 
 ## Progress and verification
 
@@ -43,10 +43,12 @@ not work.
   display topology. If no active physical output is found, it creates a Parsec
   VDD. A physical host currently mirrors only the primary output. Verify both
   modes live.
-- A Windows tray controller now shows service/session status, offers elevated
-  Start/Stop controls, opens the host log, and exits independently of the host
-  service. The installer registers it for each user sign-in and launches it
-  for the installing session. Verify installation and multi-account behavior.
+- The Windows tray app now opens a main host/client window with a compatible
+  peer list, Connect/Disconnect, host service status/controls, an
+  FFplay video window, and mouse/keyboard/scroll forwarding over the WebSocket
+  sidecar. The installer allows the FFplay receiver port range through the
+  Tailscale-only firewall rule. This is implemented but not yet installed or
+  verified live.
 - Windows now has an Automatic LocalSystem service supervisor. It launches a
   SYSTEM worker in the active console session, restarts it after a session
   change or unexpected exit, and keeps DXGI capture out of Session 0. The
@@ -69,10 +71,10 @@ not work.
 2. **Verify display modes.** Test primary physical-display mirroring without
    topology changes, then VDD creation when headless. A physical host currently
    mirrors only its primary output even if multiple displays were requested.
-3. **Verify routine host controls.** Install the tray task, confirm it appears
-   in the current session and after another user's sign-in, check session
-   status and elevated service start/stop, and confirm closing the tray leaves
-   the host service running.
+3. **Verify Windows host/client UI.** Install the tray task and check the main
+   window lists compatible peers, connects, forwards input, disconnects, and
+   leaves the host service running. Confirm the tray appears after another
+   user's sign-in and service controls request elevation as expected.
 4. **Video performance and refresh rate.** Playback feels sluggish. Measure
    capture, GPU readback, NVENC, UDP delivery, decode, and render pacing. Fix
    the bottleneck before raising the current 30 fps target; then evaluate

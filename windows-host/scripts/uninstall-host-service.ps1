@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $serviceName = 'PsychBeaconHost'
 $trayTaskName = 'PsychBeacon Host Tray'
-$firewallNames = @('PsychBeacon Host Tailscale UDP', 'PsychBeacon Host Tailscale Sidecar TCP')
+$firewallNames = @('PsychBeacon Host Tailscale UDP', 'PsychBeacon Host Tailscale Sidecar TCP', 'PsychBeacon Client Tailscale Video UDP')
 $installDir = Join-Path $env:ProgramFiles 'PsychBeaconHost'
 $installedTray = Join-Path $installDir 'host-tray.ps1'
 
