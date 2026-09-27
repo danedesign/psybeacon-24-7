@@ -27,8 +27,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    STARTUPINFOW,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -207,7 +207,7 @@ impl DesktopWorker {
                 None,
                 None,
                 false,
-                CREATE_UNICODE_ENVIRONMENT,
+                CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
                 None,
                 PCWSTR(working_directory.as_mut_ptr()),
                 &startup,
