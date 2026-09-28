@@ -14,15 +14,15 @@
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tungstenite::Message;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    VIRTUAL_KEY,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
@@ -48,6 +48,8 @@ enum InputEvent {
     MouseDown { button: MouseButton },
     MouseUp { button: MouseButton },
     Scroll { delta_x: f64, delta_y: f64 },
+    Zoom { delta: f64 },
+    Clipboard { text: String },
     KeyDown { key_code: u16 },
     KeyUp { key_code: u16 },
 }
@@ -60,23 +62,47 @@ enum MouseButton {
     Middle,
 }
 
-/// Runs the sidecar WebSocket server on `port`, accepting one connection
-/// at a time (matches the video path's v1 single-client scope — see
-/// `main.rs`'s `run_stream_session`), until `shutdown` fires. Blocks the
-/// calling thread; spawn it on its own, same as `run_stream_session`.
-pub fn run_sidecar_server(port: u16, bounds: DisplayBounds, shutdown: &AtomicBool) -> io::Result<()> {
+/// Runs the sidecar WebSocket server on `port` until the host shuts down, the
+/// client disconnects, or the client fails to connect within the startup
+/// grace period. Client loss sets `client_disconnected` so the video workers
+/// stop and release their virtual displays.
+pub fn run_sidecar_server(
+    port: u16,
+    bounds: DisplayBounds,
+    shutdown: &AtomicBool,
+    client_disconnected: &AtomicBool,
+    tailscale_only: bool,
+) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     listener.set_nonblocking(true)?;
     log::info!("Sidecar: listening for input connections on ws://0.0.0.0:{port}");
+    let connection_deadline = Instant::now() + Duration::from_secs(15);
 
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) && !client_disconnected.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, addr)) => {
+                if tailscale_only && !crate::is_tailscale_ip(addr.ip()) {
+                    log::warn!("Sidecar: rejecting non-tailnet connection from {addr}");
+                    continue;
+                }
                 log::info!("Sidecar: connection from {addr}");
-                handle_connection(stream, bounds, shutdown);
+                let connected =
+                    handle_connection(stream, bounds, port == 43703, shutdown, client_disconnected);
                 log::info!("Sidecar: connection from {addr} ended");
+                if connected {
+                    client_disconnected.store(true, Ordering::SeqCst);
+                    log::info!("Sidecar: client disconnected; ending the display session");
+                    break;
+                }
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock) => {
+                if Instant::now() >= connection_deadline {
+                    log::warn!(
+                        "Sidecar: no client connected on port {port} within 15s; ending the display session"
+                    );
+                    client_disconnected.store(true, Ordering::SeqCst);
+                    break;
+                }
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -89,7 +115,13 @@ pub fn run_sidecar_server(port: u16, bounds: DisplayBounds, shutdown: &AtomicBoo
     Ok(())
 }
 
-fn handle_connection(stream: TcpStream, bounds: DisplayBounds, shutdown: &AtomicBool) {
+fn handle_connection(
+    stream: TcpStream,
+    bounds: DisplayBounds,
+    clipboard_enabled: bool,
+    shutdown: &AtomicBool,
+    client_disconnected: &AtomicBool,
+) -> bool {
     // Handshake first, on a blocking stream; only afterward do we want a
     // short read timeout, so the message loop can still notice `shutdown`
     // without a slow/absent client wedging this thread forever.
@@ -97,36 +129,154 @@ fn handle_connection(stream: TcpStream, bounds: DisplayBounds, shutdown: &Atomic
         Ok(s) => s,
         Err(e) => {
             log::warn!("Sidecar: WebSocket handshake failed: {e}");
-            return;
+            return false;
         }
     };
 
-    if let Err(e) = socket.get_ref().set_read_timeout(Some(Duration::from_millis(200))) {
+    if let Err(e) = socket
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(200)))
+    {
         log::warn!("Sidecar: couldn't set a read timeout, shutdown may be delayed: {e}");
     }
 
+    let clipboard_owner = if clipboard_enabled {
+        match crate::clipboard::create_owner_window() {
+            Ok(hwnd) => Some(hwnd),
+            Err(error) => {
+                log::warn!("Sidecar: couldn't create clipboard owner window: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let clipboard_enabled = clipboard_owner.is_some();
+
+    // Trackpads send many small, precise deltas. Preserve them across input
+    // messages and emit complete wheel detents so Windows applications that
+    // only react to WHEEL_DELTA (120) still scroll reliably.
+    let mut scroll_remainder_x = 0.0;
+    let mut scroll_remainder_y = 0.0;
+    let mut last_clipboard_sequence = if clipboard_enabled {
+        crate::clipboard::sequence_number()
+    } else {
+        0
+    };
+    let mut last_client_clipboard: Option<String> = None;
+
     while !shutdown.load(Ordering::Relaxed) {
+        if clipboard_enabled {
+            let sequence = crate::clipboard::sequence_number();
+            if sequence != last_clipboard_sequence {
+                last_clipboard_sequence = sequence;
+                if let Some(text) = crate::clipboard::read_text(clipboard_owner.unwrap()) {
+                    if last_client_clipboard.as_deref() == Some(text.as_str()) {
+                        last_client_clipboard = None;
+                    } else if text.len() <= crate::clipboard::MAX_CLIPBOARD_BYTES {
+                        let payload = serde_json::json!({ "type": "clipboard", "text": text });
+                        match serde_json::to_string(&payload) {
+                            Ok(text) => {
+                                if let Err(error) = socket.send(Message::Text(text.into())) {
+                                    log::warn!("Sidecar: couldn't send clipboard update: {error}");
+                                    client_disconnected.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!("Sidecar: couldn't encode clipboard update: {error}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         match socket.read() {
+            Ok(Message::Text(text))
+                if text.len() > crate::clipboard::MAX_CLIPBOARD_BYTES * 6 + 256 =>
+            {
+                log::warn!(
+                    "Sidecar: ignoring oversized input message ({} bytes)",
+                    text.len()
+                );
+            }
             Ok(Message::Text(text)) => match serde_json::from_str::<InputEvent>(&text) {
+                Ok(InputEvent::Scroll { delta_x, delta_y }) => {
+                    scroll_remainder_x += delta_x;
+                    scroll_remainder_y += delta_y;
+                    let whole_x = scroll_remainder_x.trunc();
+                    let whole_y = scroll_remainder_y.trunc();
+                    scroll_remainder_x -= whole_x;
+                    scroll_remainder_y -= whole_y;
+                    if whole_x != 0.0 || whole_y != 0.0 {
+                        inject(
+                            InputEvent::Scroll {
+                                delta_x: whole_x,
+                                delta_y: whole_y,
+                            },
+                            bounds,
+                        );
+                    }
+                }
+                Ok(InputEvent::Clipboard { text }) if clipboard_enabled => {
+                    if text.len() <= crate::clipboard::MAX_CLIPBOARD_BYTES {
+                        if let Some(current) = crate::clipboard::read_text(clipboard_owner.unwrap())
+                        {
+                            if current != text {
+                                match crate::clipboard::write_text(clipboard_owner.unwrap(), &text)
+                                {
+                                    Ok(()) => {
+                                        last_client_clipboard = Some(text);
+                                        last_clipboard_sequence =
+                                            crate::clipboard::sequence_number();
+                                    }
+                                    Err(error) => log::warn!(
+                                        "Sidecar: couldn't update Windows clipboard: {error}"
+                                    ),
+                                }
+                            }
+                        } else if let Err(error) =
+                            crate::clipboard::write_text(clipboard_owner.unwrap(), &text)
+                        {
+                            log::warn!("Sidecar: couldn't update Windows clipboard: {error}");
+                        } else {
+                            last_client_clipboard = Some(text);
+                            last_clipboard_sequence = crate::clipboard::sequence_number();
+                        }
+                    } else {
+                        log::warn!("Sidecar: ignoring clipboard text larger than 1 MiB");
+                    }
+                }
+                Ok(InputEvent::Clipboard { .. }) => {}
                 Ok(event) => inject(event, bounds),
                 Err(e) => log::warn!("Sidecar: bad message, ignoring ({e}): {text}"),
             },
             Ok(Message::Close(_)) => {
                 log::info!("Sidecar: client closed the connection");
+                client_disconnected.store(true, Ordering::SeqCst);
                 break;
             }
             Ok(_) => {} // binary/ping/pong — not used, ignored
             Err(tungstenite::Error::Io(ref e))
-                if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
             {
                 continue;
             }
             Err(e) => {
                 log::warn!("Sidecar: connection error, closing: {e}");
+                client_disconnected.store(true, Ordering::SeqCst);
                 break;
             }
         }
     }
+    if let Some(hwnd) = clipboard_owner {
+        crate::clipboard::destroy_owner_window(hwnd);
+    }
+    true
 }
 
 fn inject(event: InputEvent, bounds: DisplayBounds) {
@@ -142,6 +292,15 @@ fn inject(event: InputEvent, bounds: DisplayBounds) {
         InputEvent::MouseDown { button } => send_mouse_button(button, true),
         InputEvent::MouseUp { button } => send_mouse_button(button, false),
         InputEvent::Scroll { delta_x, delta_y } => send_scroll(delta_x, delta_y),
+        InputEvent::Clipboard { .. } => {}
+        InputEvent::Zoom { delta } => {
+            // Windows apps commonly expose pinch-to-zoom through Ctrl+wheel.
+            // NSEvent magnification is a fraction (for example, 0.1), while
+            // SendInput's wheel unit is 120 per detent.
+            send_key(0x11, false); // VK_CONTROL down
+            send_scroll(0.0, delta * 10.0);
+            send_key(0x11, true); // VK_CONTROL up
+        }
         InputEvent::KeyDown { key_code } => send_key(key_code, false),
         InputEvent::KeyUp { key_code } => send_key(key_code, true),
     }
@@ -207,7 +366,11 @@ fn send_key(vk_code: u16, key_up: bool) {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(vk_code),
                 wScan: 0,
-                dwFlags: if key_up { KEYEVENTF_KEYUP } else { Default::default() },
+                dwFlags: if key_up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    Default::default()
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },

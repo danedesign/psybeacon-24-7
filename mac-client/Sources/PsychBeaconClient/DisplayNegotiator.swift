@@ -67,13 +67,17 @@ struct DisplayNegotiator {
     private func requestAndWait(
         hostAddress: String, hostControlPort: UInt16, basePort: UInt16, displayCount: Int
     ) throws -> [DisplayInfo] {
+        let requestedCount = min(4, max(1, displayCount))
+        // Windows adds displays sequentially and waits 2s for each new output
+        // to settle before replying. Include room for driver/IOCTL overhead.
+        let replyTimeout = max(timeout, TimeInterval(requestedCount) * 8.0)
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else { throw DisplayNegotiatorError.socketCreationFailed }
         defer { close(fd) }
 
         var rcvTimeout = timeval(
-            tv_sec: Int(timeout),
-            tv_usec: Int32(timeout.truncatingRemainder(dividingBy: 1) * 1_000_000)
+            tv_sec: Int(replyTimeout),
+            tv_usec: Int32(replyTimeout.truncatingRemainder(dividingBy: 1) * 1_000_000)
         )
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
@@ -82,7 +86,7 @@ struct DisplayNegotiator {
         addr.sin_port = in_port_t(hostControlPort.bigEndian)
         addr.sin_addr.s_addr = inet_addr(hostAddress)
 
-        let message = "PSYBEACON_START_STREAM_V1:\(basePort):\(displayCount)"
+        let message = "PSYBEACON_START_STREAM_V1:\(basePort):\(requestedCount)"
         let payload = Array(message.utf8)
 
         let sent = withUnsafePointer(to: &addr) { addrPtr -> Int in
@@ -97,15 +101,15 @@ struct DisplayNegotiator {
         }
         guard sent > 0 else { throw DisplayNegotiatorError.sendFailed }
         print(
-            "DisplayNegotiator: requested \(displayCount) display(s) from \(hostAddress):\(hostControlPort), "
+            "DisplayNegotiator: requested \(requestedCount) display(s) from \(hostAddress):\(hostControlPort), "
                 + "base port \(basePort)"
         )
 
         // Each display takes ~2s to settle host-side before the manifest is
         // sent, so a multi-display request can take a while to reply —
-        // retry the recv a few times within our overall `timeout` rather
+        // retry the recv a few times within our overall `replyTimeout` rather
         // than treating one timed-out read as final.
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = Date().addingTimeInterval(replyTimeout)
         var replyBuffer = [UInt8](repeating: 0, count: 8192)
         while Date() < deadline {
             let received = recv(fd, &replyBuffer, replyBuffer.count, 0)

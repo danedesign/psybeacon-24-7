@@ -67,7 +67,9 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
     DXGI_OUTDUPL_FRAME_INFO,
 };
-use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICE_PRIMARY_DEVICE,
+};
 
 /// A single captured frame, already read back into system memory as tightly
 /// packed BGRA8 (row padding from `RowPitch` stripped during readback).
@@ -146,6 +148,17 @@ impl DesktopDuplicator {
         adapter_name_substring: &str,
         before: &std::collections::HashSet<String>,
     ) -> io::Result<Self> {
+        let name = Self::new_output_name(adapter_name_substring, before)?;
+        Self::for_output_name(adapter_name_substring, &name)
+    }
+
+    /// Identifies the single output added since `before` without opening a
+    /// duplication interface. Call this immediately after adding a display;
+    /// open it later, once all display topology changes are complete.
+    pub fn new_output_name(
+        adapter_name_substring: &str,
+        before: &std::collections::HashSet<String>,
+    ) -> io::Result<String> {
         let after = enumerate_matching_outputs(adapter_name_substring)?;
         let mut new_ones: Vec<_> = after
             .into_iter()
@@ -160,11 +173,7 @@ impl DesktopDuplicator {
                      the snapshot — nothing to safely open"
                 ),
             )),
-            1 => {
-                let (name, adapter, output) = new_ones.remove(0);
-                log::info!("Capture: targeting newly-added output {name}");
-                unsafe { Self::open(&adapter, &output, name) }
-            }
+            1 => Ok(new_ones.remove(0).0),
             n => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -173,6 +182,47 @@ impl DesktopDuplicator {
                 ),
             )),
         }
+    }
+
+    /// Re-enumerates the adapter and opens duplication on this exact output.
+    /// Device names are captured during the add/diff step so later topology
+    /// changes cannot cause us to guess which output belongs to a session.
+    pub fn for_output_name(adapter_name_substring: &str, name: &str) -> io::Result<Self> {
+        let outputs = enumerate_matching_outputs(adapter_name_substring)?;
+        let (_, adapter, output) = outputs
+            .into_iter()
+            .find(|(candidate, _, _)| candidate == name)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("output {name} is no longer present on the {adapter_name_substring} adapter"),
+                )
+            })?;
+        log::info!("Capture: targeting newly-added output {name}");
+        unsafe { Self::open(&adapter, &output, name.to_owned()) }
+    }
+
+    /// Chooses the active primary physical display (preferring Windows'
+    /// primary-device flag) and opens Desktop Duplication on that exact
+    /// output. Parsec's normal connected-monitor path mirrors this output;
+    /// virtual displays are reserved for hosts with no active physical one.
+    pub fn for_primary_physical_output() -> io::Result<Option<Self>> {
+        let mut outputs: Vec<_> = enumerate_all_outputs()?
+            .into_iter()
+            .filter(|(name, adapter_name, _, _)| {
+                !adapter_name
+                    .to_lowercase()
+                    .contains(&crate::vdd::VDD_ADAPTER_NAME.to_lowercase())
+                    && is_display_active(name)
+            })
+            .collect();
+
+        outputs.sort_by_key(|(name, _, _, _)| !is_primary_display(name));
+        let Some((name, _, adapter, output)) = outputs.into_iter().next() else {
+            return Ok(None);
+        };
+        log::info!("Capture: mirroring active physical display {name}");
+        unsafe { Self::open(&adapter, &output, name).map(Some) }
     }
 
     /// Diagnostic only — never for real capture, use [`for_new_output`] for
@@ -278,30 +328,12 @@ impl DesktopDuplicator {
         })
     }
 
-    /// Re-asserts extended-desktop topology, then drops the current
-    /// duplication interface and opens a fresh one on the same output.
-    /// Required after `DXGI_ERROR_ACCESS_LOST`.
-    ///
-    /// Two distinct failure modes both surface as this same error, which is
-    /// why this does both things rather than just recreating duplication:
-    /// a genuinely-attached display whose duplication object died (a
-    /// transient compositor hiccup, e.g. from a lock-screen/secure-desktop
-    /// transition) just needs a fresh `DuplicateOutput` — but a display
-    /// that was never actually attached to the composited desktop in the
-    /// first place (confirmed via `[System.Windows.Forms.Screen]::AllScreens`
-    /// while debugging: it was missing entirely) fails identically, and no
-    /// amount of recreating duplication helps there since the real problem
-    /// is upstream of DXGI. `VddSession::start` already calls
-    /// `vdd::extend_desktop_onto_all_displays` once, but that single call
-    /// isn't reliably sufficient — observed failing silently (no error
-    /// returned, display still absent from `AllScreens`) on a second,
-    /// otherwise-identical run two days after the first fix was verified,
-    /// same machine, same code. Retrying the extend call here as well, on
-    /// every recovery attempt, is what actually closes that gap.
+    /// Drops the current duplication interface and opens a fresh one on the
+    /// same output. Do not reapply display topology here: `SetDisplayConfig`
+    /// can visibly disrupt the user's physical desktop, and repeating it
+    /// during a persistent `ACCESS_LOST` condition creates a recovery loop
+    /// that keeps changing topology without fixing capture.
     fn recreate_duplication(&mut self) -> io::Result<()> {
-        if let Err(e) = crate::vdd::extend_desktop_onto_all_displays() {
-            log::warn!("Capture: re-extend attempt during recovery failed: {e}");
-        }
         log::warn!(
             "Capture: {} DISPLAY_DEVICE_ACTIVE = {}",
             self.device_name,
@@ -458,6 +490,15 @@ fn enumerate_matching_outputs(
     adapter_name_substring: &str,
 ) -> io::Result<Vec<(String, IDXGIAdapter, IDXGIOutput)>> {
     let needle = adapter_name_substring.to_lowercase();
+    Ok(enumerate_all_outputs()?
+        .into_iter()
+        .filter(|(_, friendly, _, _)| friendly.to_lowercase().contains(&needle))
+        .map(|(name, _, adapter, output)| (name, adapter, output))
+        .collect())
+}
+
+fn enumerate_all_outputs(
+) -> io::Result<Vec<(String, String, IDXGIAdapter, IDXGIOutput)>> {
     let mut matches = Vec::new();
 
     unsafe {
@@ -480,10 +521,9 @@ fn enumerate_matching_outputs(
 
                 if let Ok(desc) = output.GetDesc() {
                     let device_name = decode_wide(&desc.DeviceName);
-                    let friendly = adapter_friendly_name(&device_name);
-                    log::debug!("Capture: output {device_name} = {friendly:?}");
-                    if friendly.is_some_and(|f| f.to_lowercase().contains(&needle)) {
-                        matches.push((device_name, adapter.clone(), output));
+                    if let Some(friendly) = adapter_friendly_name(&device_name) {
+                        log::debug!("Capture: output {device_name} = {friendly}");
+                        matches.push((device_name, friendly, adapter.clone(), output));
                     }
                 }
 
@@ -515,6 +555,24 @@ fn is_display_active(device_name: &str) -> bool {
         }
         if decode_wide(&dd.DeviceName).eq_ignore_ascii_case(device_name) {
             return (dd.StateFlags & DISPLAY_DEVICE_ACTIVE).0 != 0;
+        }
+        index += 1;
+    }
+}
+
+fn is_primary_display(device_name: &str) -> bool {
+    let mut index = 0u32;
+    loop {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        let ok = unsafe { EnumDisplayDevicesW(PCWSTR::null(), index, &mut dd, 0) };
+        if !ok.as_bool() {
+            return false;
+        }
+        if decode_wide(&dd.DeviceName).eq_ignore_ascii_case(device_name) {
+            return (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE).0 != 0;
         }
         index += 1;
     }

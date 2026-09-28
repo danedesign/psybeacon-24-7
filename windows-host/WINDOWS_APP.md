@@ -13,20 +13,24 @@ cargo build --bins
 .\target\debug\psybeacon.exe
 ```
 
-Run the app as Administrator to host. Install the Parsec virtual display driver
-and an FFmpeg build with NVENC support first; see [vdd-setup.md](docs/vdd-setup.md)
-and [HOST_PC_SETUP.md](../HOST_PC_SETUP.md). The app starts
-`psybeacon-host.exe` from the same directory when **Start hosting** is clicked.
-It sends a graceful shutdown signal when hosting is stopped or the window
-closes, so virtual displays and FFmpeg encoder processes can be cleaned up.
+Run the app as Administrator to change hosting state. Install an FFmpeg build
+with NVENC support first; the Parsec virtual display driver is also needed for
+headless hosting. See [vdd-setup.md](docs/vdd-setup.md) and
+[HOST_PC_SETUP.md](../HOST_PC_SETUP.md). If the `PsychBeaconHost` Windows
+service is installed, the app controls that service; it keeps hosting when
+the window closes. Without the service, **Start hosting** launches
+`psybeacon-host.exe` from the same directory and closing the window asks that
+child process to stop gracefully. The service installer still requires the
+full source checkout; the release ZIP is not an installer.
 
 To connect, select a host discovered under **Nearby PCs**, or enter the
 host's reachable LAN or Tailscale IPv4 address or hostname. LAN discovery uses
-UDP broadcast; a host on another subnet or on Tailscale alone needs a direct
-address. The Windows viewer requires `ffmpeg` on PATH. It requests one
+UDP broadcast; the installed service accepts Tailscale clients only, so use a
+direct Tailscale address for it. The Windows viewer requires `ffmpeg` on PATH
+or in the configured `%ProgramData%\PsychBeacon\ffmpeg-path.txt` directory. It requests one
 display on UDP 43701, receives H.264 on UDP 43702, and sends keyboard/mouse
-input over the host's WebSocket sidecar port. **Disconnect** sends a stop
-request to the host and closes the local decoder. Allow inbound UDP 43702 on
+input over the host's WebSocket sidecar port. **Disconnect** closes the
+sidecar and local decoder; the host cleans up when the sidecar closes. Allow inbound UDP 43702 on
 the viewing PC if Windows Firewall blocks video.
 
 The existing `cargo run` command still runs the console host. To launch the
@@ -43,6 +47,7 @@ window after building both binaries, use the command above.
 - Session setup uses the existing unauthenticated PsychBeacon protocol. Use
   only on a trusted LAN or private Tailscale network; do not expose the
   control and input ports to the public internet.
-- Both host and viewer depend on the existing virtual display and capture
-  pipeline. If Desktop Duplication reports `ACCESS_LOST`, the GUI cannot
-  repair that driver or session issue; the Activity tab shows the host log.
+- The host mirrors the primary physical display, or creates a virtual display
+  when headless. If Desktop Duplication reports `ACCESS_LOST`, check the
+  Activity tab for a standalone host or
+  `%ProgramData%\PsychBeacon\logs\host.log` for the installed service.

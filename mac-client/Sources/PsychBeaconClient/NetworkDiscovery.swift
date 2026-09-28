@@ -10,6 +10,14 @@ enum HostRoute {
     case tailscale(host: String, port: UInt16)
 }
 
+struct DiscoveredComputer: Identifiable, Hashable, Sendable {
+    let hostName: String
+    let address: String
+    let port: UInt16
+
+    var id: String { address }
+}
+
 enum DiscoveryError: Error, CustomStringConvertible {
     case socketCreationFailed
     case hostNotFound
@@ -19,6 +27,7 @@ enum DiscoveryError: Error, CustomStringConvertible {
     /// gave no way to tell whether the CLI was even found at all versus
     /// found-but-no-matching-peer.
     case tailscaleBinaryNotFound
+    case tailscaleStatusFailed(Int32)
     case tailscaleNoMatchingPeer(searchedFor: String, peersSeen: [String])
 
     var description: String {
@@ -27,6 +36,8 @@ enum DiscoveryError: Error, CustomStringConvertible {
         case .hostNotFound: return "hostNotFound"
         case .tailscaleBinaryNotFound:
             return "tailscaleBinaryNotFound (checked /Applications/Tailscale.app, /usr/local/bin, /opt/homebrew/bin)"
+        case .tailscaleStatusFailed(let status):
+            return "Tailscale status command exited with code \(status)"
         case .tailscaleNoMatchingPeer(let searchedFor, let peersSeen):
             let peerList = peersSeen.isEmpty ? "(none)" : peersSeen.joined(separator: ", ")
             return "tailscaleNoMatchingPeer(searched for hostname containing \"\(searchedFor)\", " +
@@ -44,8 +55,7 @@ struct NetworkDiscovery {
     var magicRequest = "PSYBEACON_DISCOVER_V1"
     var magicReplyPrefix = "PSYBEACON_HOST_V1:"
 
-    /// Which Tailscale peer counts as "the" host, when LAN discovery finds
-    /// nothing and this falls back to the mesh — a substring matched
+    /// Which Tailscale peer counts as "the" host — a substring matched
     /// case-insensitively against each peer's Tailscale `HostName`.
     /// Defaults to "psybeacon", which only ever matches a peer actually
     /// named that; override via `PSYBEACON_TARGET_HOST` for a real tailnet,
@@ -57,14 +67,84 @@ struct NetworkDiscovery {
     var tailscaleTargetHostnameSubstring: String =
         ProcessInfo.processInfo.environment["PSYBEACON_TARGET_HOST"] ?? "psybeacon"
 
-    /// Call once at client startup. Throws if the host can't be found by
-    /// either path; the caller should surface that (retry, or prompt for a
-    /// manual host address) rather than silently hanging.
+    /// Call once at client startup. An explicitly configured target prefers
+    /// Tailscale directly; otherwise LAN discovery remains the fast path.
+    /// Throws if the host can't be found by either path; the caller should
+    /// surface that (retry, or prompt for a manual host address) rather than
+    /// silently hanging.
     func resolveHostRoute() async throws -> HostRoute {
+        if let target = ProcessInfo.processInfo.environment["PSYBEACON_TARGET_HOST"],
+           !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return try await tailscaleHostRoute()
+        }
         if let lan = try? await broadcastForHost() {
             return lan
         }
         return try await tailscaleHostRoute()
+    }
+
+    /// Lists Windows Tailscale peers that are online and running the
+    /// PsychBeacon discovery responder. Tailscale presence alone is not
+    /// enough: probing the control port excludes unrelated PCs.
+    func discoverCompatibleComputers() async throws -> [DiscoveredComputer] {
+        let status = try await readTailscaleStatus()
+        let peers = status.peers.filter { $0.isOnline == true }
+
+        return await withTaskGroup(of: DiscoveredComputer?.self) { group in
+            for peer in peers {
+                guard let address = peer.tailscaleIPs.first(where: { $0.contains(".") }) else { continue }
+                group.addTask {
+                    await probeTailscalePeer(hostName: peer.hostName, address: address)
+                }
+            }
+
+            var computers: [DiscoveredComputer] = []
+            for await computer in group {
+                if let computer { computers.append(computer) }
+            }
+            return computers.sorted {
+                $0.hostName.localizedStandardCompare($1.hostName) == .orderedAscending
+            }
+        }
+    }
+
+    private func readTailscaleStatus() async throws -> TailscaleStatus {
+        let candidates = [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
+        ]
+        guard let binaryPath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw DiscoveryError.tailscaleBinaryNotFound
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = ["status", "--json"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw DiscoveryError.tailscaleStatusFailed(process.terminationStatus)
+        }
+        return try JSONDecoder().decode(TailscaleStatus.self, from: data)
+    }
+
+    private func probeTailscalePeer(hostName: String, address: String) async -> DiscoveredComputer? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: probePsychBeaconHost(
+                    hostName: hostName,
+                    address: address,
+                    port: discoveryPort,
+                    request: magicRequest,
+                    replyPrefix: magicReplyPrefix,
+                    timeout: timeout
+                ))
+            }
+        }
     }
 
     // MARK: - LAN broadcast
@@ -138,7 +218,7 @@ struct NetworkDiscovery {
         return .lan(host: String(cString: addrBuf), port: discoveryPort)
     }
 
-    // MARK: - Tailscale fallback
+    // MARK: - Tailscale route
 
     private func tailscaleHostRoute() async throws -> HostRoute {
         let candidates = [
@@ -177,6 +257,55 @@ struct NetworkDiscovery {
     }
 }
 
+private func probePsychBeaconHost(
+    hostName: String,
+    address: String,
+    port: UInt16,
+    request: String,
+    replyPrefix: String,
+    timeout: TimeInterval
+) -> DiscoveredComputer? {
+    let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+
+    var receiveTimeout = timeval(
+        tv_sec: Int(timeout),
+        tv_usec: Int32(timeout.truncatingRemainder(dividingBy: 1) * 1_000_000)
+    )
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+    var destination = sockaddr_in()
+    destination.sin_family = sa_family_t(AF_INET)
+    destination.sin_port = in_port_t(port.bigEndian)
+    destination.sin_addr.s_addr = inet_addr(address)
+
+    let payload = Array(request.utf8)
+    let sent = withUnsafePointer(to: &destination) { addressPointer -> Int in
+        addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            payload.withUnsafeBufferPointer { buffer in
+                sendto(fd, buffer.baseAddress, buffer.count, 0, socketAddress,
+                       socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+    guard sent == payload.count else { return nil }
+
+    var responseBuffer = [UInt8](repeating: 0, count: 512)
+    var sender = sockaddr_in()
+    var senderLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let received = withUnsafeMutablePointer(to: &sender) { senderPointer -> Int in
+        senderPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            recvfrom(fd, &responseBuffer, responseBuffer.count, 0, socketAddress, &senderLength)
+        }
+    }
+    guard received > 0, sender.sin_addr.s_addr == destination.sin_addr.s_addr else { return nil }
+
+    let response = String(decoding: responseBuffer[0..<received], as: UTF8.self)
+    guard response.hasPrefix(replyPrefix) else { return nil }
+    return DiscoveredComputer(hostName: hostName, address: address, port: port)
+}
+
 /// Minimal model of `tailscale status --json` — only the fields we need.
 /// Verify field names against the installed Tailscale version if this stops
 /// matching; the local API's JSON shape isn't strictly versioned.
@@ -186,10 +315,12 @@ private struct TailscaleStatus: Decodable {
     struct Peer: Decodable {
         let hostName: String
         let tailscaleIPs: [String]
+        let isOnline: Bool?
 
         enum CodingKeys: String, CodingKey {
             case hostName = "HostName"
             case tailscaleIPs = "TailscaleIPs"
+            case isOnline = "Online"
         }
     }
 

@@ -5,7 +5,7 @@
 //! display sessions can shut down cleanly when hosting is stopped.
 
 use std::io::{self, BufRead, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -28,7 +28,6 @@ const DISCOVER: &str = "PSYBEACON_DISCOVER_V1";
 const HOST_REPLY: &str = "PSYBEACON_HOST_V1:";
 const START: &str = "PSYBEACON_START_STREAM_V1:";
 const MANIFEST: &str = "PSYBEACON_STREAM_INFO_V1:";
-const STOP: &str = "PSYBEACON_STOP_STREAM_V1";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,7 +105,6 @@ enum Message {
 }
 
 struct ClientSession {
-    target: SocketAddr,
     stop: Arc<AtomicBool>,
     decoder: Child,
     udp_thread: Option<thread::JoinHandle<()>>,
@@ -116,9 +114,6 @@ struct ClientSession {
 impl ClientSession {
     fn stop(mut self, frame: &Arc<Mutex<Option<Vec<u8>>>>) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-            let _ = socket.send_to(STOP.as_bytes(), self.target);
-        }
         let _ = self.decoder.kill();
         let _ = self.decoder.wait();
         if let Some(worker) = self.udp_thread.take() {
@@ -132,11 +127,17 @@ impl ClientSession {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    configure_ffmpeg_path();
     let frame = Arc::new(Mutex::new(None));
     let frame_server_stop = Arc::new(AtomicBool::new(false));
     let (frame_url, frame_server) = start_frame_server(frame.clone(), frame_server_stop.clone())?;
     let mut frame_server = Some(frame_server);
     let state = Arc::new(Mutex::new(UiState::new(frame_url)));
+    if let Ok(Some(running)) = service_state() {
+        let mut s = state.lock().unwrap();
+        s.hosting = running;
+        s.host_status = if running { "Online · Windows service" } else { "Service stopped" }.into();
+    }
     let discovery_worker = start_discovery(state.clone(), frame_server_stop.clone());
     let mut discovery_worker = Some(discovery_worker);
     let (tx, rx) = mpsc::channel::<Message>();
@@ -162,6 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_stop: Option<Arc<AtomicBool>> = None;
     let mut pending_worker: Option<thread::JoinHandle<()>> = None;
     let mut next_render = Instant::now();
+    let mut next_service_refresh = Instant::now() + Duration::from_secs(3);
 
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
@@ -177,8 +179,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session.stop(&frame);
             }
             if let Some(mut child) = host.take() {
-                child.stdin.take(); // EOF asks the managed host to unwind.
-                let _ = child.wait();
+                if request_host_stop().is_ok() {
+                    let _ = child.wait();
+                }
             }
             frame_server_stop.store(true, Ordering::SeqCst);
             if let Some(worker) = frame_server.take() {
@@ -195,32 +198,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match message {
                 Message::Action(action) => match action.get("type").and_then(|v| v.as_str()) {
                     Some("startHost") if host.is_none() && !state.lock().unwrap().host_stopping => {
-                        match start_host(state.clone()) {
-                            Ok(child) => {
-                                host = Some(child);
-                                let mut s = state.lock().unwrap();
-                                s.hosting = true;
-                                s.host_stopping = false;
-                                s.host_status = "Starting host…".into();
-                            }
-                            Err(error) => {
-                                state.lock().unwrap().host_status = format!("Could not start host: {error}");
-                            }
+                        match service_state() {
+                            Ok(Some(_)) => match service_command("start") {
+                                Ok(()) => {
+                                    let mut s = state.lock().unwrap();
+                                    s.hosting = true;
+                                    s.host_stopping = true;
+                                    s.host_status = "Starting Windows service…".into();
+                                }
+                                Err(error) => state.lock().unwrap().host_status = format!("Could not start service: {error}"),
+                            },
+                            _ => match start_host(state.clone()) {
+                                Ok(child) => {
+                                    host = Some(child);
+                                    let mut s = state.lock().unwrap();
+                                    s.hosting = true;
+                                    s.host_status = "Starting host…".into();
+                                }
+                                Err(error) => state.lock().unwrap().host_status = format!("Could not start host: {error}"),
+                            },
                         }
                     }
                     Some("stopHost") => {
-                        if let Some(mut child) = host.take() {
-                            child.stdin.take();
-                            let state = state.clone();
-                            state.lock().unwrap().host_stopping = true;
-                            thread::spawn(move || {
-                                let _ = child.wait();
-                                let mut s = state.lock().unwrap();
-                                s.host_status = "Ready to host".into();
-                                s.host_stopping = false;
-                            });
+                        if service_state().ok().flatten().is_some() {
+                            match service_command("stop") {
+                                Ok(()) => {
+                                    let mut s = state.lock().unwrap();
+                                    s.hosting = false;
+                                    s.host_stopping = true;
+                                    s.host_status = "Stopping Windows service…".into();
+                                }
+                                Err(error) => state.lock().unwrap().host_status = format!("Could not stop service: {error}"),
+                            }
+                        } else if host.is_some() {
+                            match request_host_stop() {
+                                Ok(()) => {
+                                    let mut child = host.take().unwrap();
+                                    state.lock().unwrap().host_stopping = true;
+                                    state.lock().unwrap().hosting = false;
+                                    let worker_state = state.clone();
+                                    thread::spawn(move || {
+                                        let _ = child.wait();
+                                        let mut s = worker_state.lock().unwrap();
+                                        s.host_status = "Ready to host".into();
+                                        s.host_stopping = false;
+                                    });
+                                }
+                                Err(error) => state.lock().unwrap().host_status = format!("Could not stop host: {error}"),
+                            }
                         }
-                        state.lock().unwrap().hosting = false;
                     }
                     Some("connect") if client.is_none() && !state.lock().unwrap().connecting => {
                         let address = action.get("address").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -292,6 +318,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        if Instant::now() >= next_service_refresh {
+            if let Ok(Some(running)) = service_state() {
+                let mut s = state.lock().unwrap();
+                if !s.host_stopping || running == s.hosting {
+                    s.hosting = running;
+                    s.host_stopping = false;
+                    s.host_status = if running { "Online · Windows service" } else { "Service stopped" }.into();
+                }
+            }
+            next_service_refresh = Instant::now() + Duration::from_secs(3);
+        }
+
         if let Some(session) = client.as_mut() {
             if matches!(session.decoder.try_wait(), Ok(Some(_))) {
                 if let Some(session) = client.take() {
@@ -357,10 +395,9 @@ fn start_host(state: Arc<Mutex<UiState>>) -> io::Result<Child> {
         return Err(io::Error::new(io::ErrorKind::NotFound, "psybeacon-host.exe is missing; build both binaries with cargo build --bins"));
     }
     let mut child = Command::new(executable)
-        .arg("--managed")
         .env("RUST_LOG", "info")
         .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -382,6 +419,62 @@ fn start_host(state: Arc<Mutex<UiState>>) -> io::Result<Child> {
         });
     }
     Ok(child)
+}
+
+fn service_state() -> io::Result<Option<bool>> {
+    let output = Command::new("sc.exe")
+        .args(["query", "PsychBeaconHost"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    Ok(Some(status.lines().any(|line| line.contains("STATE") && line.contains("RUNNING"))))
+}
+
+fn service_command(action: &str) -> io::Result<()> {
+    let output = Command::new("sc.exe")
+        .args([action, "PsychBeaconHost"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let message = String::from_utf8_lossy(&output.stdout);
+        Err(io::Error::other(message.trim().to_string()))
+    }
+}
+
+fn request_host_stop() -> io::Result<()> {
+    let executable = std::env::current_exe()?.with_file_name("psybeacon-host.exe");
+    let status = Command::new(executable)
+        .arg("--stop")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("host stop request exited with {status}")))
+    }
+}
+
+fn configure_ffmpeg_path() {
+    let program_data = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let path_file = program_data.join("PsychBeacon").join("ffmpeg-path.txt");
+    let Some(directory) = std::fs::read_to_string(path_file)
+        .ok()
+        .map(|path| PathBuf::from(path.trim().trim_start_matches('\u{feff}')))
+        .filter(|path| path.is_dir()) else { return; };
+    let mut paths = vec![directory];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        std::env::set_var("PATH", joined);
+    }
 }
 
 fn connect_client(address: &str, frame: Arc<Mutex<Option<Vec<u8>>>>, stop: Arc<AtomicBool>) -> io::Result<(ClientSession, DisplayInfo)> {
@@ -477,7 +570,7 @@ fn connect_client(address: &str, frame: Arc<Mutex<Option<Vec<u8>>>>, stop: Arc<A
         cleanup(decoder, stop, udp_thread, jpeg_thread);
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Host returned no displays"));
     };
-    Ok((ClientSession { target, stop, decoder, udp_thread: Some(udp_thread), jpeg_thread: Some(jpeg_thread) }, info))
+    Ok((ClientSession { stop, decoder, udp_thread: Some(udp_thread), jpeg_thread: Some(jpeg_thread) }, info))
 }
 
 fn start_frame_server(frame: Arc<Mutex<Option<Vec<u8>>>>, stop: Arc<AtomicBool>) -> io::Result<(String, thread::JoinHandle<()>)> {
