@@ -122,11 +122,16 @@ without crashing.
 ```powershell
 cargo run
 ```
-Expected log lines, in order:
+The console host logs `Listening for discovery broadcasts on UDP :43701`.
+It adds a virtual display only after a client requests a stream. To use the
+combined Windows host/viewer window instead, see
+[`windows-host/WINDOWS_APP.md`](windows-host/WINDOWS_APP.md).
+
+Expected log lines after a stream request:
 ```
 VDD: added virtual display index 0
 VDD: virtual display 0 is up and pinging (driver version: Ok(45))
-Listening for discovery broadcasts on UDP :43701
+Multi-stream: display 0 up: ...
 ```
 If instead you see "entity not found" or `ERROR_ACCESS_DENIED` warnings,
 either the shell isn't actually elevated or the driver install in step 4

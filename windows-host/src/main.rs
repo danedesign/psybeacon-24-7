@@ -21,7 +21,7 @@ mod encode;
 mod sidecar;
 mod vdd;
 
-use std::io;
+use std::io::{self, Read};
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,6 +42,7 @@ const DISCOVERY_REPLY_PREFIX: &str = "PSYBEACON_HOST_V1:";
 /// `:<count>` is optional and defaults to 1, for a plain single-display
 /// request.
 const START_STREAM_PREFIX: &str = "PSYBEACON_START_STREAM_V1:";
+const STOP_STREAM_REQUEST: &str = "PSYBEACON_STOP_STREAM_V1";
 /// Sent back to the client, over the discovery socket, once every requested
 /// display has actually been added and its real bounds are known (a JSON
 /// array of `DisplayInfo`) — *before* any frames start flowing, so the
@@ -104,6 +105,14 @@ fn main() -> io::Result<()> {
     log::info!("PsychBeacon host launcher starting");
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    if args.get(1).map(String::as_str) == Some("--managed") {
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || {
+            let _ = io::stdin().read(&mut [0u8; 1]);
+            log::info!("Managed launcher requested shutdown");
+            shutdown.store(true, Ordering::SeqCst);
+        });
+    }
     {
         let shutdown = shutdown.clone();
         ctrlc::set_handler(move || {
@@ -149,6 +158,9 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
     // v1 scope: one stream at a time; a request while already streaming is
     // logged and ignored rather than queued or replacing the active one.
     let streaming = Arc::new(AtomicBool::new(false));
+    let mut session_thread: Option<std::thread::JoinHandle<()>> = None;
+    let session_stop = Arc::new(AtomicBool::new(false));
+    let mut session_client = None;
 
     let mut buf = [0u8; 512];
     while !shutdown.load(Ordering::Relaxed) {
@@ -170,6 +182,11 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
             match socket.send_to(reply.as_bytes(), src) {
                 Ok(_) => log::info!("Answered discovery request from {src}"),
                 Err(e) => log::warn!("Failed to reply to {src}: {e}"),
+            }
+        } else if message == STOP_STREAM_REQUEST {
+            if session_client == Some(src.ip()) {
+                log::info!("Stop-stream request from {src}");
+                session_stop.store(true, Ordering::SeqCst);
             }
         } else if let Some(rest) = message.strip_prefix(START_STREAM_PREFIX) {
             let mut parts = rest.splitn(2, ':');
@@ -204,14 +221,24 @@ fn run_discovery_responder(shutdown: Arc<AtomicBool>) -> io::Result<()> {
             };
             let shutdown = shutdown.clone();
             let streaming = streaming.clone();
-            std::thread::spawn(move || {
-                run_multi_stream_session(&shutdown, &reply_socket, src, base_port, display_count);
+            session_stop.store(false, Ordering::SeqCst);
+            session_client = Some(src.ip());
+            let session_stop_for_thread = session_stop.clone();
+            if let Some(thread) = session_thread.take() {
+                let _ = thread.join();
+            }
+            session_thread = Some(std::thread::spawn(move || {
+                run_multi_stream_session(&shutdown, &session_stop_for_thread, &reply_socket, src, base_port, display_count);
                 streaming.store(false, Ordering::SeqCst);
-            });
+            }));
         }
     }
 
     log::info!("Discovery responder shutting down");
+    session_stop.store(true, Ordering::SeqCst);
+    if let Some(thread) = session_thread {
+        let _ = thread.join();
+    }
     Ok(())
 }
 
@@ -245,6 +272,7 @@ fn remove_index_and_exit(args: &[String]) -> io::Result<()> {
 /// windows, each with its own decoder, renderer, and input channel.
 fn run_multi_stream_session(
     shutdown: &AtomicBool,
+    session_stop: &AtomicBool,
     reply_socket: &UdpSocket,
     client_src: std::net::SocketAddr,
     base_port: u16,
@@ -331,7 +359,7 @@ fn run_multi_stream_session(
                 let target = format!("udp://{client_ip}:{}", info.stream_port);
                 let sidecar_port = info.sidecar_port;
                 scope.spawn(move || {
-                    run_display_stream(shutdown, vdd_session, duplicator, target, sidecar_port);
+                    run_display_stream(shutdown, session_stop, vdd_session, duplicator, target, sidecar_port);
                 })
             })
             .collect();
@@ -352,6 +380,7 @@ fn run_multi_stream_session(
 /// several of these concurrently, each on its own already-added display.
 fn run_display_stream(
     shutdown: &AtomicBool,
+    session_stop: &AtomicBool,
     vdd_session: vdd::VddSession,
     mut duplicator: capture::DesktopDuplicator,
     target: String,
@@ -393,7 +422,7 @@ fn run_display_stream(
     };
 
     let frame_interval = Duration::from_millis(1000 / STREAM_FPS as u64);
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::Relaxed) && !session_stop.load(Ordering::Relaxed) {
         match duplicator.capture_next_frame(frame_interval) {
             Ok(Some(frame)) => {
                 if let Err(e) = encoder.write_frame(&frame.data) {

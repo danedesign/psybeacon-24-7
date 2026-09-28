@@ -6,13 +6,15 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 PsychBeacon 24/7 is a custom, high-performance remote desktop tool for using a macOS client to control a remote Windows host — ultra-low-latency, high-refresh-rate (120Hz+) streaming, seamless virtual multi-display management, and shared rich clipboard history, replicating premium Parsec/Moonlight features without a subscription.
 
-This repo is very early-stage, but **the full chain works end-to-end as of 2026-09-26**: macOS client discovers the Windows host (LAN or Tailscale mesh), requests a stream, the host adds a virtual display and starts capturing/NVENC-encoding to that client, and the client receives, decodes, and renders it in a window showing the real remote desktop — confirmed over an actual Tailscale/WireGuard connection between two machines on different physical subnets, not a same-host simulation. The input half of the sidecar (keyboard/mouse) is now built on both sides — Windows-side verified against real `SendInput`/cursor movement, Mac-side unverified (see module 4). Multi-display window orchestration is also built (host can add N displays per session, client stands up N independent windows) but unverified against more than one real display. Still unbuilt: clipboard sync.
+This repo is very early-stage, but **the Mac-to-Windows full chain works end-to-end as of 2026-09-26**: macOS client discovers the Windows host (LAN or Tailscale mesh), requests a stream, the host adds a virtual display and starts capturing/NVENC-encoding to that client, and the client receives, decodes, and renders it in a window showing the real remote desktop — confirmed over an actual Tailscale/WireGuard connection between two machines on different physical subnets, not a same-host simulation. The input half of the sidecar (keyboard/mouse) is now built on both sides — Windows-side verified against real `SendInput`/cursor movement, Mac-side unverified (see module 4). Multi-display window orchestration is also built (host can add N displays per session, client stands up N independent windows) but unverified against more than one real display. Still unbuilt: clipboard sync.
+
+As of 2026-09-28, `windows-host` also builds a combined Windows host/viewer GUI (`psybeacon.exe`), with one-display FFmpeg/JPEG playback and WebSocket input. Its window and decoder command have been checked locally, but an actual Windows-to-Windows stream is not yet verified. This viewer is not the planned Direct3D low-latency renderer. See [`windows-host/WINDOWS_APP.md`](windows-host/WINDOWS_APP.md).
 
 ## Repository layout
 
 Two independent components, each with its own toolchain — there is no shared build system or workspace tying them together:
 
-- `windows-host/` — Rust crate; runs on the Windows machine being controlled.
+- `windows-host/` — Rust crate; `psybeacon-host` is the console host and `psybeacon` is the combined Windows GUI.
 - `mac-client/` — Swift package; runs on the macOS client. **Requires macOS/Xcode to build** — it cannot be built or type-checked from this Windows checkout.
 
 ## Commands
@@ -20,7 +22,9 @@ Two independent components, each with its own toolchain — there is no shared b
 **windows-host** (Rust, from `windows-host/`):
 ```
 cargo check          # type-check
-cargo run             # build and run the launcher
+cargo run             # build and run the console host
+cargo build --bins    # build console host and Windows GUI together
+.\target\debug\psybeacon.exe   # open the combined GUI
 cargo build --release
 ```
 No test suite exists yet. **Run elevated (Administrator)** once the real

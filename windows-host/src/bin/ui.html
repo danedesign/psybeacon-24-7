@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PsychBeacon</title>
+<style>
+:root{font-family:"Segoe UI Variable","Segoe UI",Arial,sans-serif;color:#ecf3f5;background:#080e13;font-size:14px}
+*{box-sizing:border-box}body{margin:0;min-width:900px;min-height:620px}button,input{font:inherit}button{cursor:pointer}
+.app{display:flex;min-height:100vh;background:radial-gradient(circle at 72% 0,#152c32 0,transparent 38%),#0a1015}
+.rail{width:232px;flex:none;background:#0b141a;border-right:1px solid #203039;display:flex;flex-direction:column;padding:30px 17px 20px}
+.brand{display:flex;align-items:center;gap:11px;padding:0 12px 38px;font-size:19px;font-weight:700;letter-spacing:-.5px}
+.brand-mark{width:33px;height:33px;border-radius:10px;background:#b1ead6;display:grid;place-items:center;color:#11271f;font-size:22px;box-shadow:0 0 26px #82eac544}
+.nav{display:grid;gap:7px}.nav button{border:0;background:transparent;color:#91a5af;text-align:left;padding:12px 14px;border-radius:11px;display:flex;align-items:center;gap:13px;font-weight:600}.nav button.active{background:#1c3339;color:#d8fbec}.nav button:hover{background:#193039;color:#fff}.nav svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7}
+.rail-bottom{margin-top:auto;padding:17px 13px;border-top:1px solid #23333a;color:#8296a0}.rail-bottom strong{display:block;color:#d9e6e6;font-size:13px;margin-top:4px}.online-dot{width:8px;height:8px;background:#88dcbc;border-radius:50%;display:inline-block;margin-right:6px;box-shadow:0 0 12px #88dcbc}
+main{flex:1;min-width:0;padding:29px 42px 44px;max-width:1500px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:34px}.eyebrow{color:#8fa9ae;font-size:11px;letter-spacing:2px;text-transform:uppercase;font-weight:700}.top-right{display:flex;gap:9px;align-items:center;color:#a0b1b8}.avatar{height:34px;width:34px;border-radius:50%;background:#314e52;display:grid;place-items:center;color:#d9f5e7;font-weight:700;margin-left:7px}
+h1{font-size:37px;line-height:1.15;margin:8px 0 10px;letter-spacing:-1.5px;font-weight:650}h2{font-size:20px;letter-spacing:-.4px;margin:0 0 6px}p{line-height:1.5}.muted{color:#91a7af}.intro{margin:0 0 26px;font-size:15px}
+.hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(340px,.95fr);gap:24px}.card{border:1px solid #284149;border-radius:19px;background:linear-gradient(135deg,#15272d,#101e25);box-shadow:0 15px 38px #0004;overflow:hidden}.connect{padding:29px;position:relative}.connect:after{content:"";position:absolute;right:-76px;top:-94px;width:270px;height:270px;border-radius:50%;border:35px solid #7ce0bf0c;pointer-events:none}.card-kicker{display:flex;align-items:center;gap:8px;color:#abedd3;text-transform:uppercase;font-size:11px;letter-spacing:1.65px;font-weight:700;margin-bottom:25px}.mini-icon{width:25px;height:25px;border-radius:7px;background:#244c46;display:grid;place-items:center;font-size:15px}.connect p{margin:0 0 27px}.field-label{font-size:12px;color:#b6c9cd;font-weight:650;margin-bottom:8px}.input-row{display:flex;gap:9px}.input-row input{flex:1;min-width:0;border:1px solid #3a5660;border-radius:10px;background:#0b191f;color:#f0f8f6;padding:13px 15px;outline:none}.input-row input:focus{border-color:#98dfc7;box-shadow:0 0 0 3px #98dfc722}.input-row input::placeholder{color:#67818a}.primary{border:0;background:#a7e7cd;color:#102721;border-radius:10px;padding:0 22px;font-weight:750;white-space:nowrap}.primary:hover{background:#c5f7e1}.primary:disabled{opacity:.5;cursor:default}.hint{color:#7f9ba3;font-size:12px;margin-top:14px}.status-line{min-height:18px;color:#b4d7cf;margin-top:16px;font-size:12px}
+.host{padding:29px;background:linear-gradient(145deg,#1a3437,#102126 72%)}.host .card-kicker{margin-bottom:25px}.host-layout{display:flex;justify-content:space-between;gap:16px}.host p{margin:0;max-width:270px}.device-visual{height:74px;width:104px;border:3px solid #527e79;border-radius:8px;background:linear-gradient(140deg,#245253,#13262e);box-shadow:0 12px 23px #0006, inset 0 0 28px #88e4c419;display:grid;place-items:center;color:#91dec8;font-size:28px;position:relative;flex:none}.device-visual:after{content:"";position:absolute;width:39px;height:6px;border-radius:4px;background:#527e79;bottom:-12px}.device-visual:before{content:"";position:absolute;width:16px;height:8px;background:#527e79;bottom:-9px}.host-foot{display:flex;justify-content:space-between;align-items:center;margin-top:24px;padding-top:22px;border-top:1px solid #355057}.host-state{color:#a6bfc2;font-size:12px;max-width:65%}.host-state b{display:block;color:#e4f5ef;margin-bottom:3px}.toggle{border:1px solid #93d9c1;color:#b5f1d9;background:#153b37;border-radius:9px;padding:10px 16px;font-weight:700}.toggle:hover{background:#245348}.toggle.on{border-color:#996d68;background:#3a2324;color:#ffc3b6}
+.section-header{display:flex;justify-content:space-between;align-items:end;margin:35px 0 17px}.section-header small{color:#7e9ca4}.devices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px}.device-card{border:1px solid #253b42;background:#111e24;border-radius:15px;padding:19px;min-height:132px}.device-card:hover{border-color:#4c786e}.device-icon{height:30px;width:30px;border-radius:9px;background:#284943;color:#a6e2ce;display:grid;place-items:center;margin-bottom:15px}.device-card strong{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.device-card span{display:block;color:#83a0a8;font-size:12px;margin-top:5px}.device-card button{margin-top:14px;color:#b7f0d8;border:0;padding:0;background:none;font-size:12px;font-weight:700}.empty{color:#66838d;font-size:12px}.bottom-note{margin-top:28px;border:1px solid #254047;background:#0e1d22;padding:16px 19px;border-radius:11px;color:#8da7af;font-size:12px;display:flex;gap:12px;align-items:center}.bottom-note b{color:#d7eee5}
+#activity,#settings{display:none}.subpage{max-width:850px}.log{background:#081318;border:1px solid #29434a;border-radius:12px;padding:18px;min-height:340px;white-space:pre-wrap;overflow:auto;color:#a9d5c9;font:12px/1.7 Consolas,monospace}.setting-card{padding:24px;margin-top:16px}.setting-card b{display:block;margin-bottom:7px}.setting-card p{margin:0;color:#92aab0}.badge{display:inline-block;background:#1b3b37;color:#ace5d0;border-radius:20px;padding:5px 10px;font-size:11px;font-weight:700;margin-left:9px}
+#viewer{display:none;position:fixed;inset:0;background:#050809;z-index:5;flex-direction:column}.view-bar{height:52px;display:flex;align-items:center;gap:14px;background:#0f1c21;border-bottom:1px solid #294149;padding:0 17px}.view-bar strong{font-size:14px}.view-bar .muted{font-size:12px}.view-bar .spacer{flex:1}.view-bar button{background:#263b41;border:1px solid #3a555c;color:#e6f3ef;padding:7px 13px;border-radius:8px}.view-bar button:hover{background:#37565a}.view-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:#050809;outline:none;position:relative}.view-stage img{width:100%;height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}.view-wait{position:absolute;color:#95aea9;font-size:16px;pointer-events:none}.view-stage:focus{box-shadow:inset 0 0 0 2px #8ee2c5}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="rail">
+ <div class="brand"><span class="brand-mark">✦</span> PsychBeacon</div>
+ <div class="nav">
+  <button class="active" data-tab="home"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg> Home</button>
+  <button data-tab="activity"><svg viewBox="0 0 24 24"><path d="M4 17V5h16v12zM2 20h20"/><path d="m7 12 3-3 3 3 4-4"/></svg> Activity</button>
+  <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg> Setup</button>
+ </div>
+ <div class="rail-bottom"><span class="online-dot"></span> This device<strong id="rail-name">This PC</strong></div>
+</aside>
+<main>
+ <div class="top"><span class="eyebrow">Remote desktop, made personal</span><span class="top-right"><span class="online-dot"></span> Ready <span class="avatar">P</span></span></div>
+ <div id="home">
+  <h1>Your workspace, anywhere.</h1><p class="intro muted">Connect to another PC or make this one available for a remote session.</p>
+  <div class="hero">
+   <section class="card connect"><div class="card-kicker"><span class="mini-icon">↗</span> Connect to a PC</div><h2>Jump back into your space.</h2><p class="muted">Enter the other computer’s Tailscale IP, LAN IP, or hostname.</p><div class="field-label">Computer address</div><div class="input-row"><input id="address" spellcheck="false" placeholder="e.g. 100.90.129.7 or studio-pc"><button id="connect" class="primary">Connect →</button></div><div class="hint">PsychBeacon must be running as a host on the other PC.</div><div id="connection-status" class="status-line"></div></section>
+   <section class="card host"><div class="card-kicker"><span class="mini-icon">◈</span> This computer</div><div class="host-layout"><div><h2>Share this PC.</h2><p class="muted">Turn on hosting so another device can connect when you need it.</p></div><div class="device-visual">✦</div></div><div class="host-foot"><div class="host-state"><b id="device-name">This PC</b><span id="host-status">Ready to host</span></div><button id="host-toggle" class="toggle">Start hosting</button></div></section>
+  </div>
+  <div class="section-header"><div><h2>Recent connections</h2><small>Get back to a computer in one click.</small></div></div>
+  <div class="devices"><div class="device-card"><div class="device-icon">▣</div><strong id="recent-name">No recent PC yet</strong><span id="recent-hint">Your last connection will appear here.</span><button id="recent-connect" style="display:none">Connect again →</button></div><div class="device-card"><div class="device-icon">◎</div><strong>Direct connection</strong><span>Use an IP or hostname above.</span><span class="empty">LAN and Tailscale supported</span></div><div class="device-card"><div class="device-icon">✦</div><strong id="tile-device">This PC</strong><span>Available when hosting is on.</span><span id="tile-host" class="empty">Hosting off</span></div></div>
+  <div class="section-header"><div><h2>Nearby PCs</h2><small>Hosts discovered on your local network.</small></div></div><div id="lan-devices" class="devices"><div class="device-card"><div class="device-icon">⌁</div><strong>Looking for devices</strong><span>Any active LAN host will appear here.</span></div></div>
+  <div class="bottom-note"><span style="font-size:18px;color:#9de9ce">ⓘ</span><span><b>First time hosting?</b> Run PsychBeacon as Administrator, with the virtual display driver and FFmpeg installed. See the Setup tab.</span></div>
+ </div>
+ <div id="activity" class="subpage"><h1>Activity</h1><p class="muted">Recent host events and connection details.</p><div id="log" class="log">No activity yet.</div></div>
+ <div id="settings" class="subpage"><h1>Setup</h1><p class="muted">Everything this PC needs to host and view sessions.</p><div class="card setting-card"><b>Host requirements <span class="badge">Windows</span></b><p>Run this app as Administrator. Install the Parsec virtual display driver and an FFmpeg build with NVENC support, then allow inbound UDP 43701 and TCP 43703 through Windows Firewall.</p></div><div class="card setting-card"><b>Connect to a PC</b><p>Enter a reachable LAN or Tailscale IPv4 address on Home. The viewer uses FFmpeg to decode the stream, so FFmpeg must be on this PC’s PATH. Allow inbound UDP 43702 for video.</p></div><div class="card setting-card"><b>Current video mode</b><p>The Windows viewer currently supports one display. Video is decoded to JPEG frames inside this window; a later Direct3D renderer will be needed for the project’s low latency, 120 Hz goal.</p></div></div>
+</main>
+</div>
+<div id="viewer"><div class="view-bar"><span class="online-dot"></span><strong id="view-host">Remote PC</strong><span class="muted" id="view-display"></span><span class="spacer"></span><span class="muted" id="input-status">Connecting input…</span><button id="disconnect">Disconnect</button></div><div class="view-stage" id="view-stage" tabindex="0"><span class="view-wait" id="view-wait">Waiting for video…</span><img id="video" alt="Remote desktop"></div></div>
+<script>
+const send = (type, extras={}) => window.ipc.postMessage(JSON.stringify({type,...extras}));
+let current={connected:false,hosting:false,connecting:false}, sidecar=null, frameTimer=null, recent='', peerSignature='';
+const address=document.getElementById('address'), video=document.getElementById('video'), stage=document.getElementById('view-stage');
+document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b===button));['home','activity','settings'].forEach(id=>document.getElementById(id).style.display=id===button.dataset.tab?'block':'none');});
+document.getElementById('connect').onclick=()=>send('connect',{address:address.value});
+address.onkeydown=e=>{if(e.key==='Enter')send('connect',{address:address.value});};
+document.getElementById('host-toggle').onclick=()=>send(current.hosting?'stopHost':'startHost');
+document.getElementById('disconnect').onclick=()=>send('disconnect');
+document.getElementById('recent-connect').onclick=()=>send('connect',{address:recent});
+let frameEndpoint='';
+function nextFrame(){if(frameEndpoint)video.src=frameEndpoint+'?t='+Date.now();}
+function startVideo(url){frameEndpoint=url;nextFrame();}
+function stopVideo(){frameEndpoint='';if(frameTimer)clearTimeout(frameTimer);frameTimer=null;video.removeAttribute('src');document.getElementById('view-wait').style.display='block';}
+video.onload=()=>{document.getElementById('view-wait').style.display='none';if(frameEndpoint)frameTimer=setTimeout(nextFrame,40);};
+video.onerror=()=>{if(frameEndpoint)frameTimer=setTimeout(nextFrame,100);};
+function openSidecar(url){if(sidecar)sidecar.close();document.getElementById('input-status').textContent='Connecting input…';try{sidecar=new WebSocket(url);sidecar.onopen=()=>document.getElementById('input-status').textContent='Input connected';sidecar.onclose=()=>document.getElementById('input-status').textContent='Input unavailable';sidecar.onerror=()=>document.getElementById('input-status').textContent='Input unavailable';}catch(e){document.getElementById('input-status').textContent='Input unavailable';}}
+function input(event){if(sidecar?.readyState===WebSocket.OPEN)sidecar.send(JSON.stringify(event));}
+function normalized(e){const r=video.getBoundingClientRect();const ratio=Math.min(r.width/video.naturalWidth,r.height/video.naturalHeight);const w=video.naturalWidth*ratio,h=video.naturalHeight*ratio,x=r.left+(r.width-w)/2,y=r.top+(r.height-h)/2;return {x:Math.max(0,Math.min(1,(e.clientX-x)/w)),y:Math.max(0,Math.min(1,(e.clientY-y)/h))};}
+stage.onmousemove=e=>{if(video.naturalWidth)input({type:'mouseMove',...normalized(e)});};
+stage.onmousedown=e=>{if(!video.naturalWidth)return;stage.focus();e.preventDefault();input({type:'mouseMove',...normalized(e)});input({type:'mouseDown',button:['left','middle','right'][e.button]||'left'});};
+window.addEventListener('mouseup',e=>{if(current.connected)input({type:'mouseUp',button:['left','middle','right'][e.button]||'left'});});
+stage.oncontextmenu=e=>e.preventDefault();
+stage.onwheel=e=>{e.preventDefault();input({type:'scroll',deltaX:e.deltaX/100,deltaY:-e.deltaY/100});};
+function vk(e){const k=e.key;if(k.length===1){const c=k.toUpperCase().charCodeAt(0);if((c>=65&&c<=90)||(c>=48&&c<=57))return c;}return {Enter:13,Backspace:8,Tab:9,Escape:27,Space:32,' ':32,Shift:16,Control:17,Alt:18,Meta:91,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Delete:46,Insert:45,Home:36,End:35,PageUp:33,PageDown:34}[k]||(k[0]==='F'&&+k.slice(1)>=1&&+k.slice(1)<=12?111+(+k.slice(1)):null);}
+const pressed=new Set();
+stage.onkeydown=e=>{const code=vk(e);if(code){e.preventDefault();if(!pressed.has(code)){pressed.add(code);input({type:'keyDown',keyCode:code});}}};
+stage.onkeyup=e=>{const code=vk(e);if(code){e.preventDefault();pressed.delete(code);input({type:'keyUp',keyCode:code});}};
+window.addEventListener('blur',()=>{for(const code of pressed)input({type:'keyUp',keyCode:code});pressed.clear();});
+function renderPeers(peers){const signature=JSON.stringify(peers);if(signature===peerSignature)return;peerSignature=signature;const root=document.getElementById('lan-devices');root.replaceChildren();if(!peers.length){const card=document.createElement('div');card.className='device-card';const icon=document.createElement('div');icon.className='device-icon';icon.textContent='⌁';const title=document.createElement('strong');title.textContent='No nearby hosts yet';const detail=document.createElement('span');detail.textContent='Start hosting on another PC to see it here.';card.append(icon,title,detail);root.append(card);return;}for(const peer of peers){const card=document.createElement('div');card.className='device-card';const icon=document.createElement('div');icon.className='device-icon';icon.textContent='▣';const title=document.createElement('strong');title.textContent=peer.name||'Windows PC';const detail=document.createElement('span');detail.textContent=peer.address;const button=document.createElement('button');button.textContent='Connect →';button.onclick=()=>send('connect',{address:peer.address});card.append(icon,title,detail,button);root.append(card);}}
+window.renderState=s=>{
+ document.getElementById('rail-name').textContent=s.deviceName;document.getElementById('device-name').textContent=s.deviceName;document.getElementById('tile-device').textContent=s.deviceName;
+ document.getElementById('host-status').textContent=s.hostStatus;document.getElementById('tile-host').textContent=s.hosting?'Hosting on':'Hosting off';
+ const toggle=document.getElementById('host-toggle');toggle.textContent=s.hostStopping?'Stopping…':(s.hosting?'Stop hosting':'Start hosting');toggle.classList.toggle('on',s.hosting);toggle.disabled=s.hostStopping;
+ document.getElementById('connection-status').textContent=s.connectionStatus;
+ const connect=document.getElementById('connect');connect.disabled=s.connecting||s.connected;connect.textContent=s.connecting?'Connecting…':'Connect →';
+ document.getElementById('log').textContent=s.logLines.length?s.logLines.join('\n'):'No activity yet.';
+ if(s.recentHost){recent=s.recentHost;document.getElementById('recent-name').textContent=recent;document.getElementById('recent-hint').textContent='Last connected PC';document.getElementById('recent-connect').style.display='block';}
+ renderPeers(s.peers||[]);
+ if(s.connected&&!current.connected){document.getElementById('viewer').style.display='flex';document.getElementById('view-host').textContent=s.connectedHost;document.getElementById('view-display').textContent=s.displayLabel;startVideo(s.frameUrl);openSidecar(s.sidecarUrl);stage.focus();}
+ if(!s.connected&&current.connected){document.getElementById('viewer').style.display='none';stopVideo();if(sidecar){sidecar.close();sidecar=null;}}
+ current=s;
+};
+</script>
+</body>
+</html>
